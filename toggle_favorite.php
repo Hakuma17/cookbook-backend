@@ -1,0 +1,48 @@
+<?php
+header('Content-Type: application/json; charset=UTF-8');
+require_once __DIR__ . '/inc/config.php';
+require_once __DIR__ . '/inc/functions.php';
+session_start();
+
+// ตรวจ login
+$userId = getLoggedInUserId();
+if (! $userId) {
+    http_response_code(401);
+    echo json_encode(['success' => false, 'message' => 'ต้องล็อกอินก่อน']);
+    exit;
+}
+
+// รับค่าจาก POST
+$recipeId = isset($_POST['recipe_id']) ? intval($_POST['recipe_id']) : 0;
+$favorite = isset($_POST['favorite']) && $_POST['favorite'] === '1';
+
+if ($recipeId <= 0) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'recipe_id ไม่ถูกต้อง']);
+    exit;
+}
+
+try {
+    if ($favorite) {
+        // เพิ่มโปรด (ignore ถ้ามีซ้ำ)
+        $stmt = $pdo->prepare("
+            INSERT IGNORE INTO favorites(user_id, recipe_id)
+            VALUES (?, ?)
+        ");
+        $stmt->execute([$userId, $recipeId]);
+    } else {
+        // ลบโปรด
+        $stmt = $pdo->prepare("
+            DELETE FROM favorites
+            WHERE user_id = ? AND recipe_id = ?
+        ");
+        $stmt->execute([$userId, $recipeId]);
+    }
+    echo json_encode(['success' => true, 'message' => 'สำเร็จ']);
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => $e->getMessage()
+    ]);
+}
