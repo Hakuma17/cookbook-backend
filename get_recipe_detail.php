@@ -27,6 +27,7 @@ try {
             r.name,
             r.image_path,
             r.prep_time,
+            r.nServings,
             r.average_rating,
             (SELECT COUNT(*) FROM review WHERE recipe_id = r.recipe_id) AS review_count,
             r.created_at,
@@ -85,12 +86,28 @@ try {
     $stmtStep->execute([$id]);
     $row['steps'] = $stmtStep->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
-    // 7) สรุปโภชนาการ (placeholder)
+    // 7) สรุปโภชนาการจากวัตถุดิบจริง
+    $sqlNutri = "
+        SELECT
+            SUM(n.energy_kcal * ri.grams_actual / 100) AS calories,
+            SUM(n.protein_g * ri.grams_actual / 100) AS protein,
+            SUM(n.fat_g * ri.grams_actual / 100) AS fat,
+            SUM(n.carbohydrate_available_g * ri.grams_actual / 100) AS carbs
+        FROM recipe_ingredient ri
+        JOIN ingredients i ON ri.ingredient_id = i.ingredient_id
+        JOIN nutrition n ON i.nutrition_id = n.nutrition_id
+        WHERE ri.recipe_id = ?
+    ";
+    $stmtNutri = $pdo->prepare($sqlNutri);
+    $stmtNutri->execute([$id]);
+    $nutri = $stmtNutri->fetch(PDO::FETCH_ASSOC);
+
+    // fallback = 0 ถ้าค่าเป็น null
     $row['nutrition'] = [
-        'calories' => 594.2,
-        'fat'      => 23.8,
-        'protein'  => 39.1,
-        'carbs'    => 54.1,
+        'calories' => round($nutri['calories'] ?? 0, 1),
+        'fat'      => round($nutri['fat'] ?? 0, 1),
+        'protein'  => round($nutri['protein'] ?? 0, 1),
+        'carbs'    => round($nutri['carbs'] ?? 0, 1),
     ];
 
     // 8) favorite, user_rating, current_servings (ถ้า login)
