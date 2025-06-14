@@ -1,9 +1,8 @@
 <?php
-// ทำลาย session แล้ว redirect ไป login.php
+// logout.php — ทำลาย session เมื่อถูกเรียกจาก Flutter
 
 session_start();
 $_SESSION = [];
 session_destroy();
 
-header('Location: login.php');
-exit;
+echo json_encode(['success' => true]);

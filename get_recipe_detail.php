@@ -159,7 +159,13 @@ try {
     ";
     $stmtCom = $pdo->prepare($sqlCom);
     $stmtCom->execute([$id]);
-    $row['comments'] = $stmtCom->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $comments = $stmtCom->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $currentUserId = $_SESSION['user_id'] ?? null;
+
+    foreach ($comments as &$c) {
+        $c['is_mine'] = ($currentUserId && $c['user_id'] == $currentUserId) ? 1 : 0;
+    }
+    $row['comments'] = $comments;
 
     // 10) ดึงหมวดหมู่
     $sqlCat = "
