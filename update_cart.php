@@ -2,71 +2,54 @@
 // update_cart.php
 // เพิ่มหรืออัปเดตจำนวนเสิร์ฟของสูตรอาหารในตะกร้า
 
-header('Content-Type: application/json; charset=UTF-8');
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
-
-require_once __DIR__ . '/inc/config.php';
-require_once __DIR__ . '/inc/functions.php';
-session_start();
+require_once __DIR__ . '/inc/config.php';    // เชื่อมต่อฐานข้อมูล ($pdo)
+require_once __DIR__ . '/inc/functions.php'; // ฟังก์ชันช่วยเหลือ (requireLogin, jsonOutput, ฯลฯ)
 
 try {
-    // 1) ตรวจสอบการล็อกอิน
-    $userId = getLoggedInUserId();
-    if (! $userId) {
-        echo json_encode([
+    // 1) ตรวจสอบล็อกอิน และดึง user_id
+    $userId = requireLogin();
+
+    // 2) รับค่า POST และ validate
+    $recipeId  = filter_input(INPUT_POST, 'recipe_id', FILTER_VALIDATE_INT)    ?: 0;
+    $nServings = filter_input(INPUT_POST, 'nServings', FILTER_VALIDATE_FLOAT) ?: 0.0;
+
+    if ($recipeId <= 0 || $nServings <= 0) {
+        // ถ้าข้อมูลไม่ถูกต้อง ส่ง 400 Bad Request
+        jsonOutput([
             'success' => false,
-            'message' => 'กรุณาเข้าสู่ระบบก่อน'
-        ]);
-        exit;
+            'message' => 'ข้อมูลไม่ถูกต้อง',
+            'data'    => null
+        ], 400);
     }
 
-    // 2) รับค่า POST
-    $recipeId = isset($_POST['recipe_id']) ? intval($_POST['recipe_id']) : 0;
-    $count    = isset($_POST['count'])     ? floatval($_POST['count']) : 0.0;
+    // 3) Upsert: ถ้ายังไม่มีใน cart ให้ INSERT, ถ้ามีแล้วให้ UPDATE
+    $sql = "
+        INSERT INTO cart (user_id, recipe_id, nServings)
+        VALUES (:uid, :rid, :cnt)
+        ON DUPLICATE KEY UPDATE nServings = :cnt
+    ";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([
+        'uid' => $userId,
+        'rid' => $recipeId,
+        'cnt' => $nServings,
+    ]);
 
-    if ($recipeId <= 0 || $count <= 0) {
-        echo json_encode([
-            'success' => false,
-            'message' => 'ข้อมูลไม่ถูกต้อง'
-        ]);
-        exit;
-    }
-
-    // 3) ตรวจสอบว่ามีอยู่แล้วในตะกร้าไหม
-    $checkSql  = "SELECT 1 FROM cart WHERE user_id = ? AND recipe_id = ? LIMIT 1";
-    $checkStmt = $pdo->prepare($checkSql);
-    $checkStmt->execute([$userId, $recipeId]);
-    $exists    = $checkStmt->fetchColumn();
-
-    if ($exists) {
-        // 4) ถ้ามี → อัปเดต
-        $updateSql  = "UPDATE cart SET nServings = ? WHERE user_id = ? AND recipe_id = ?";
-        $updateStmt = $pdo->prepare($updateSql);
-        $updateStmt->execute([$count, $userId, $recipeId]);
-
-        echo json_encode([
-            'success' => true,
-            'message' => 'อัปเดตตะกร้าเรียบร้อย'
-        ]);
-    } else {
-        // 5) ยังไม่มี → แทรกใหม่
-        $insertSql  = "INSERT INTO cart (user_id, recipe_id, nServings) VALUES (?, ?, ?)";
-        $insertStmt = $pdo->prepare($insertSql);
-        $insertStmt->execute([$userId, $recipeId, $count]);
-
-        echo json_encode([
-            'success' => true,
-            'message' => 'เพิ่มสินค้าในตะกร้าเรียบร้อย'
-        ]);
-    }
+    // 4) ส่งผลลัพธ์ success พร้อม data กลับ
+    jsonOutput([
+        'success' => true,
+        'message' => 'อัปเดตตะกร้าเรียบร้อย',
+        'data'    => [
+            'recipe_id'  => (int)$recipeId,
+            'nServings'  => (float)$nServings,
+        ],
+    ]);
 
 } catch (Exception $e) {
-    // แม้เกิดข้อผิดพลาด ก็คืน JSON และให้ Dart อ่านได้เสมอ
-    echo json_encode([
+    // กรณีเกิดข้อผิดพลาด ส่ง status 500 พร้อมข้อความ error
+    jsonOutput([
         'success' => false,
-        'message' => 'เกิดข้อผิดพลาด: ' . $e->getMessage()
-    ]);
-    exit;
+        'message' => 'เกิดข้อผิดพลาด: ' . $e->getMessage(),
+        'data'    => null
+    ], 500);
 }

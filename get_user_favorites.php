@@ -1,26 +1,16 @@
 <?php
 // get_user_favorites.php
-// คืนรายการสูตรอาหารที่ผู้ใช้เพิ่มเป็น "สูตรโปรด"
+// คืนรายการสูตรโปรดของผู้ใช้ (Favorites)
 
-header('Content-Type: application/json; charset=UTF-8');
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
-
-require_once __DIR__ . '/inc/config.php';
-require_once __DIR__ . '/inc/functions.php';
+require_once __DIR__ . '/inc/config.php';       // เชื่อมต่อ DB (ตัวแปร $pdo)
+require_once __DIR__ . '/inc/functions.php';    // ฟังก์ชันช่วยเหลือต่าง ๆ
 
 try {
-    // ตรวจสอบว่า user_id ถูกส่งมาและเป็นตัวเลข
-    if (!isset($_GET['user_id']) || !is_numeric($_GET['user_id'])) {
-        http_response_code(400);
-        echo json_encode(['error' => 'Missing or invalid user_id']);
-        exit;
-    }
+    // 1) ตรวจสอบว่าล็อกอินแล้วหรือยัง, ถ้าไม่จะส่ง JSON 401 แล้ว exit
+    $userId = requireLogin();
 
-    $userId = (int)$_GET['user_id'];
-
-    // ดึงสูตรที่ผู้ใช้กด favorite ไว้
-    $sql = '
+    // 2) เตรียม SQL ดึงข้อมูลสูตรโปรด พร้อมนับจำนวนรีวิว
+    $sql = "
         SELECT
             f.recipe_id,
             r.name,
@@ -28,24 +18,25 @@ try {
             r.prep_time,
             r.average_rating,
             (
-                SELECT COUNT(*)
-                FROM review rv
+                SELECT COUNT(*) 
+                FROM review rv 
                 WHERE rv.recipe_id = r.recipe_id
             ) AS review_count
         FROM favorites f
         JOIN recipe r ON f.recipe_id = r.recipe_id
         WHERE f.user_id = :user_id
-    ';
+    ";
     $stmt = $pdo->prepare($sql);
     $stmt->execute(['user_id' => $userId]);
 
-    // คำนวณ image URL
-    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $baseUrl = rtrim($scheme . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']), '/');
+    // 3) สร้าง base URL สำหรับภาพ (รองรับ HTTP/HTTPS)
+    $baseUrl = getBaseUrl() . '/uploads/recipes';
 
+    // 4) แมปผลลัพธ์เป็น array พร้อมกำหนดค่า default ถ้าขาด
     $favorites = [];
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-        $imageFile = !empty($row['image_path']) ? sanitize($row['image_path']) : 'default_recipe.jpg';
+        // ถ้าไม่มี image_path ให้ใช้ default_recipe.png
+        $img = sanitize($row['image_path'] ?: 'default_recipe.png');
 
         $favorites[] = [
             'recipe_id'      => (int)$row['recipe_id'],
@@ -53,18 +44,20 @@ try {
             'prep_time'      => isset($row['prep_time']) ? (int)$row['prep_time'] : null,
             'average_rating' => (float)$row['average_rating'],
             'review_count'   => (int)$row['review_count'],
-            'image_url'      => $baseUrl . '/uploads/recipes/' . $imageFile,
+            'image_url'      => "{$baseUrl}/{$img}",
         ];
     }
 
-    echo json_encode($favorites);
-    exit;
+    // 5) ส่ง JSON กลับ (success + data)
+    jsonOutput([
+        'success' => true,
+        'data'    => $favorites
+    ]);
 
 } catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode([
-        'error' => 'Internal Server Error',
-        'message' => $e->getMessage()
-    ]);
-    exit;
+    // กรณีมีข้อผิดพลาด ส่ง 500 + ข้อความ error
+    jsonOutput([
+        'success' => false,
+        'message' => 'เกิดข้อผิดพลาด: ' . $e->getMessage()
+    ], 500);
 }
