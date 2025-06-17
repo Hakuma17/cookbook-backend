@@ -92,7 +92,7 @@ try {
             SUM(n.energy_kcal * ri.grams_actual / 100) AS calories,
             SUM(n.protein_g * ri.grams_actual / 100) AS protein,
             SUM(n.fat_g * ri.grams_actual / 100) AS fat,
-            SUM(n.carbohydrate_g * ri.grams_actual / 100) AS carbs
+            SUM(n.carbohydrate_available_g * ri.grams_actual / 100) AS carbs
         FROM recipe_ingredient ri
         JOIN ingredients i ON ri.ingredient_id = i.ingredient_id
         JOIN nutrition n ON i.nutrition_id = n.nutrition_id
@@ -114,29 +114,24 @@ try {
     $userId = function_exists('getLoggedInUserId') ? getLoggedInUserId() : null;
     if ($userId) {
         // favorite
-        $favStmt = $pdo->prepare(
-            "SELECT COUNT(*) FROM favorites WHERE recipe_id = ? AND user_id = ?"
-        );
+        $favStmt = $pdo->prepare("SELECT COUNT(*) FROM favorites WHERE recipe_id = ? AND user_id = ?");
         $favStmt->execute([$id, $userId]);
         $row['is_favorited'] = $favStmt->fetchColumn() > 0;
 
         // user_rating
-        $urStmt = $pdo->prepare(
-            "SELECT rating FROM review WHERE recipe_id = ? AND user_id = ? LIMIT 1"
-        );
+        $urStmt = $pdo->prepare("SELECT rating FROM review WHERE recipe_id = ? AND user_id = ? LIMIT 1");
         $urStmt->execute([$id, $userId]);
         $row['user_rating'] = $urStmt->fetchColumn() ?: null;
 
         // current_servings (ถ้าไม่มีใน cart ให้ default=1)
         $cartStmt = $pdo->prepare("
-            SELECT nServings
+            SELECT count_servings
             FROM cart
             WHERE recipe_id = ? AND user_id = ?
             LIMIT 1
         ");
         $cartStmt->execute([$id, $userId]);
-        $row['current_servings'] = (int) ($cartStmt->fetchColumn() ?: $row['nServings']);
-
+        $row['current_servings'] = (int) ($cartStmt->fetchColumn() ?: 1);
     } else {
         $row['is_favorited']     = false;
         $row['user_rating']      = null;
@@ -159,13 +154,7 @@ try {
     ";
     $stmtCom = $pdo->prepare($sqlCom);
     $stmtCom->execute([$id]);
-    $comments = $stmtCom->fetchAll(PDO::FETCH_ASSOC) ?: [];
-    $currentUserId = $_SESSION['user_id'] ?? null;
-
-    foreach ($comments as &$c) {
-        $c['is_mine'] = ($currentUserId && $c['user_id'] == $currentUserId) ? 1 : 0;
-    }
-    $row['comments'] = $comments;
+    $row['comments'] = $stmtCom->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
     // 10) ดึงหมวดหมู่
     $sqlCat = "
@@ -176,10 +165,7 @@ try {
     ";
     $stmtCat = $pdo->prepare($sqlCat);
     $stmtCat->execute([$id]);
-    $row['categories'] = array_column(
-        $stmtCat->fetchAll(PDO::FETCH_ASSOC),
-        'category_name'
-    );
+    $row['categories'] = array_column($stmtCat->fetchAll(PDO::FETCH_ASSOC), 'category_name');
 
     // 11) คืน JSON ทั้งหมด
     echo json_encode($row, JSON_UNESCAPED_UNICODE);
