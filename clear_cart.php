@@ -1,31 +1,25 @@
 <?php
-// clear_cart.php
-// ลบสูตรทั้งหมดในตะกร้าของผู้ใช้
-
-header('Content-Type: application/json; charset=UTF-8');
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
+// clear_cart.php — ล้างตะกร้า
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
+require_once __DIR__ . '/inc/db.php'; // เพิ่ม helper
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
+}
 
 try {
-    // 1) ตรวจสอบล็อกอินและดึง user_id
+    /* ──────────────────── 1) ตรวจล็อกอิน ──────────────────── */
     $userId = requireLogin();
 
-    // 2) ลบข้อมูลในตาราง cart ของผู้ใช้
-    $stmt = $pdo->prepare("DELETE FROM cart WHERE user_id = :user_id");
-    $stmt->execute(['user_id' => $userId]);
+    /* ──────────────────── 2) ล้างตะกร้าสูตรอาหาร ──────────────────── */
+    dbExec("DELETE FROM cart WHERE user_id = ?", [$userId]);
 
-    // 3) ตอบกลับ JSON
-    jsonOutput([
-        'success' => true,
-        'message' => 'ล้างตะกร้าเรียบร้อยแล้ว'
-    ]);
-} catch (Exception $e) {
-    jsonOutput([
-        'success' => false,
-        'message' => 'Server error: ' . $e->getMessage()
-    ], 500);
+    /* ──────────────────── 3) ส่งผลลัพธ์ ──────────────────── */
+    jsonOutput(['success' => true, 'data' => ['message' => 'ล้างตะกร้าเรียบร้อยแล้ว']]);
+
+} catch (Throwable $e) {
+    error_log('[clear_cart] ' . $e->getMessage());
+    jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }

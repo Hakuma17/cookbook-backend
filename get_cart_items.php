@@ -1,128 +1,101 @@
 <?php
-// get_cart_items.php
-// คืนรายการเมนูในตะกร้าของผู้ใช้ (Cart Items) พร้อมยอดรวมจำนวนรายการและวัตถุดิบ
-
-header('Content-Type: application/json; charset=UTF-8');
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
+// get_cart_items.php — รายการเมนูในตะกร้า
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
+require_once __DIR__ . '/inc/db.php'; // เพิ่ม helper
+
+if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+    jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
+}
 
 try {
-    // 1) ตรวจสอบล็อกอินและดึง user_id
-    // สำหรับทดสอบ ให้คอมเมนต์บรรทัด requireLogin() และกำหนด userId ตรงนี้ก่อน
-     $userId = requireLogin();
-    //$userId = 3;  // สมมติ user_id = 3 (ปรับตามข้อมูลในตาราง cart)
+    $userId = requireLogin();
+    $baseRecipeUrl = getBaseUrl() . '/uploads/recipes';
+    $baseIngUrl    = getBaseUrl() . '/uploads/ingredients';
 
-    // 2) ดึงรายการเมนูในตะกร้า พร้อมข้อมูลจาก recipe
-    $sqlRecipes = "
-        SELECT
-            c.recipe_id,
-            c.nServings AS cart_servings,
-            r.name,
-            r.image_path,
-            r.prep_time,
-            r.average_rating,
-            r.nReviewer AS review_count,
-            r.nServings AS recipe_servings
-        FROM cart AS c
-        JOIN recipe AS r ON c.recipe_id = r.recipe_id
-        WHERE c.user_id = :user_id
-    ";
-    $stmt = $pdo->prepare($sqlRecipes);
-    $stmt->execute(['user_id' => $userId]);
-    $recipes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    /* 1) เมนู + เสิร์ฟ */
+    $recipes = dbAll("
+        SELECT c.recipe_id, c.nServings cart_serv,
+               r.name, r.image_path, r.prep_time,
+               r.average_rating, r.nReviewer, r.nServings base_serv
+        FROM cart c JOIN recipe r ON c.recipe_id = r.recipe_id
+        WHERE c.user_id = ?
+    ", [$userId]);
 
-    // 3) ดึงวัตถุดิบของทุกสูตรที่อยู่ในตะกร้า
-    // ใช้ recipe_ingredient แทน cart_ingredient และดึงคอลัมน์ image_url จากตาราง ingredients
-    $sqlIng = "
-        SELECT
-            ri.recipe_id,
-            i.ingredient_id,
-            i.name,
-            i.image_url    AS image_path,
-            ri.quantity,
-            ri.unit
-        FROM cart AS c
-        JOIN recipe_ingredient AS ri ON c.recipe_id = ri.recipe_id
-        JOIN ingredients        AS i  ON ri.ingredient_id = i.ingredient_id
-        WHERE c.user_id = :user_id
-    ";
-    $stmt2 = $pdo->prepare($sqlIng);
-    $stmt2->execute(['user_id' => $userId]);
-    $ingredientsRaw = $stmt2->fetchAll(PDO::FETCH_ASSOC);
-
-    // 4) สร้าง map วัตถุดิบจาก recipe_id
-    $ingredientMap = [];
-    $baseIngUrl = getBaseUrl() . '/uploads/ingredients';
-
-    foreach ($ingredientsRaw as $row) {
-        $rid = $row['recipe_id'];
-        // ใช้ key 'image_path' เพราะเรา alias ข้างบน
-        $img = sanitize($row['image_path'] ?: 'default_ingredient.png');
-
-        $ingredientMap[$rid][] = [
-            'ingredient_id' => (int)$row['ingredient_id'],
-            'name'          => $row['name'],
-            'quantity'      => (float)$row['quantity'],
-            'unit'          => $row['unit'],
-            'image_url'     => "{$baseIngUrl}/{$img}",
-            'unit_conflict' => false
-        ];
+    if (!$recipes) {
+        jsonOutput(['success' => true, 'totalItems' => 0, 'data' => []]);
     }
 
-    // 5) รวมข้อมูลกลับเป็น cart item พร้อม ingredients
+    /* 2) วัตถุดิบของเมนูทั้งหมด */
+    $ids = implode(',', array_column($recipes, 'recipe_id'));
+    $ings = dbAll("
+        SELECT ri.recipe_id, ri.ingredient_id, i.name, i.image_url,
+               ri.quantity, ri.unit
+        FROM recipe_ingredient ri
+        JOIN ingredients i ON ri.ingredient_id = i.ingredient_id
+        WHERE ri.recipe_id IN ($ids)
+    ");
+
+    /* 3) สร้าง map วัตถุดิบต่อเมนู */
+    $ingMap = [];
+    foreach ($ings as $g) {
+        $ingMap[$g['recipe_id']][] = $g;
+    }
+
+    /* 4) ตรวจแพ้อาหาร (ครั้งเดียว) */
+    $allergyIds = dbAll('SELECT ingredient_id FROM allergyinfo WHERE user_id = ?', [$userId]);
+    $allergyIds = array_column($allergyIds, 'ingredient_id');
+
+    /* 5) ประกอบผลลัพธ์ */
     $data = [];
-    $baseRecipeUrl = getBaseUrl() . '/uploads/recipes';
-
     foreach ($recipes as $r) {
-        $rid            = $r['recipe_id'];
-        $img            = sanitize($r['image_path'] ?: 'default_recipe.png');
-        $cartServings   = (float)$r['cart_servings'];
-        $recipeServings = (float)$r['recipe_servings'];
+        $rid        = (int)$r['recipe_id'];
+        $cartServe  = (float)$r['cart_serv'];
+        $baseServe  = (float)$r['base_serv'];
+        $factor     = $baseServe > 0 ? $cartServe / $baseServe : 1;
 
-        // ปรับสัดส่วนวัตถุดิบตามจำนวนเสิร์ฟ
-        $ingredients = [];
-        if (isset($ingredientMap[$rid])) {
-            foreach ($ingredientMap[$rid] as $ing) {
-                $scaledQty = ($recipeServings > 0)
-                    ? $ing['quantity'] * $cartServings / $recipeServings
-                    : $ing['quantity'];
+        $ingredientList = [];
+        foreach ($ingMap[$rid] ?? [] as $g) {
+            $ingredientList[] = [
+                'ingredient_id' => (int)$g['ingredient_id'],
+                'name'          => $g['name'],
+                'quantity'      => round(($g['quantity'] ?? 0) * $factor, 2),
+                'unit'          => $g['unit'],
+                'image_url'     => $g['image_url']
+                    ? "{$baseIngUrl}/" . basename($g['image_url'])
+                    : "{$baseIngUrl}/default_ingredients.png",
+                'unit_conflict' => false
+            ];
+        }
 
-                $ingredients[] = [
-                    'ingredient_id' => $ing['ingredient_id'],
-                    'name'          => $ing['name'],
-                    'quantity'      => round($scaledQty, 2),
-                    'unit'          => $ing['unit'],
-                    'image_url'     => $ing['image_url'],
-                    'unit_conflict' => false
-                ];
+        $imgFile = $r['image_path'] ?: 'default_recipe.png';
+        $hasAllergy = false;
+        if ($allergyIds && $ingredientList) {
+            foreach ($ingredientList as $it) {
+                if (in_array($it['ingredient_id'], $allergyIds)) {
+                    $hasAllergy = true;
+                    break;
+                }
             }
         }
 
         $data[] = [
-            'recipe_id'     => (int)$rid,
-            'name'          => $r['name'],
-            'prep_time'     => isset($r['prep_time']) ? (int)$r['prep_time'] : null,
-            'average_rating'=> (float)$r['average_rating'],
-            'review_count'  => (int)$r['review_count'],
-            'nServings'     => $cartServings,
-            'image_url'     => "{$baseRecipeUrl}/{$img}",
-            'ingredients'   => $ingredients
+            'recipe_id'      => $rid,
+            'name'           => $r['name'],
+            'prep_time'      => $r['prep_time'] ? (int)$r['prep_time'] : null,
+            'average_rating' => (float)$r['average_rating'],
+            'review_count'   => (int)$r['nReviewer'],
+            'nServings'      => $cartServe,
+            'image_url'      => "{$baseRecipeUrl}/" . basename($imgFile),
+            'has_allergy'    => $hasAllergy,
+            'ingredients'    => $ingredientList
         ];
     }
 
-    // 6) ตอบกลับ JSON
-    jsonOutput([
-        'success'    => true,
-        'totalItems' => count($data),
-        'data'       => $data
-    ]);
-} catch (Exception $e) {
-    jsonOutput([
-        'success' => false,
-        'message' => 'Server error: ' . $e->getMessage()
-    ], 500);
+    jsonOutput(['success' => true, 'totalItems' => count($data), 'data' => $data]);
+
+} catch (Throwable $e) {
+    error_log('[cart_items] ' . $e->getMessage());
+    jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }

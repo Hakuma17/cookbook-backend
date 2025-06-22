@@ -1,5 +1,5 @@
 <?php
-// get_ingredients.php — รายชื่อวัตถุดิบทั้งหมด
+// get_allergy_list.php — รายการวัตถุดิบที่ผู้ใช้แพ้
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
@@ -10,15 +10,18 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 }
 
 try {
+    $userId = requireLogin();
+
     $rows = dbAll("
-        SELECT ingredient_id, name, image_url, category
-        FROM ingredients
-        ORDER BY name
-    ");
+        SELECT i.ingredient_id, i.name, i.image_url
+        FROM allergyinfo a
+        JOIN ingredients i ON a.ingredient_id = i.ingredient_id
+        WHERE a.user_id = ?
+    ", [$userId]);
 
     jsonOutput(['success' => true, 'data' => $rows]);
 
 } catch (Throwable $e) {
-    error_log('[get_ingredients] ' . $e->getMessage());
+    error_log('[allergy_list] ' . $e->getMessage());
     jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }

@@ -1,76 +1,73 @@
 <?php
-// new_password.php
-header('Content-Type: application/json; charset=UTF-8');
-require_once __DIR__ . '/inc/config.php';
-require_once __DIR__ . '/inc/functions.php';
+// new_password.php — รีเซ็ตรหัสผ่านด้วย OTP (Refactor)
 
-// 1) POST เท่านั้น
+require_once __DIR__.'/inc/config.php';
+require_once __DIR__.'/inc/functions.php';   // ⟵ รวม jsonOutput
+require_once __DIR__.'/inc/db.php';          // ⟵ รวม dbOne / dbExec
+
+// ─── 1) Method guard ─────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-  http_response_code(405);
-  exit(json_encode(['success'=>false,'message'=>'Method not allowed']));
+    jsonOutput(['success'=>false,'message'=>'Method not allowed'],405);
 }
 
-// 2) รับค่า & sanitize
-$email       = sanitize($_POST['email']        ?? '');
-$otp         = sanitize($_POST['otp']          ?? '');
--$newPassword = sanitize($_POST['new_password'] ?? '');
--$confirmPass = sanitize($_POST['confirm_pass']  ?? '');
-+$newPassword = sanitize($_POST['new_password'] ?? '');
+// ─── 2) รับ & validate input ─────────────────────────
+$email = sanitize($_POST['email']        ?? '');
+$otp   = sanitize($_POST['otp']          ?? '');
+$pass  =            $_POST['new_password'] ?? '';   // ไม่ต้อง sanitize hash
 
-// 3) เช็คข้อมูลครบถ้วน (ไม่ต้องเช็ค confirm_pass อีก)
-if (!$email || !$otp || !$newPassword) {
-  http_response_code(400);
-  exit(json_encode(['success'=>false,'message'=>'กรุณากรอกข้อมูลให้ครบถ้วน']));
+if ($email==='' || $otp==='' || $pass==='') {
+    jsonOutput(['success'=>false,'message'=>'กรุณากรอกข้อมูลให้ครบถ้วน'],400);
 }
 
-// 4) OTP ต้องตรงกันใน user_otp และยังไม่หมดอายุ
-$stmt = $pdo->prepare(
-  'SELECT otp, otp_expires_at
-     FROM user_otp
-    WHERE email = ?
-    LIMIT 1'
-);
-$stmt->execute([$email]);
-$row = $stmt->fetch(PDO::FETCH_ASSOC);
+try {
+    /* ───────────────────────────────────────────────
+     * 3) ตรวจ OTP  (dbOne จะคืน array|false)
+     * ───────────────────────────────────────────── */
+    $row = dbOne(
+        "SELECT otp, otp_expires_at
+           FROM user_otp
+          WHERE email = ?
+          LIMIT 1", [$email]
+    );
 
-if (
-     ! $row
-  || $row['otp'] !== $otp
-  || strtotime($row['otp_expires_at']) < time()
-) {
-  http_response_code(401);
-  exit(json_encode(['success'=>false,'message'=>'OTP ไม่ถูกต้องหรือหมดอายุ']));
+    $otpExpired = $row && strtotime($row['otp_expires_at']) < time();
+    if (!$row || $row['otp'] !== $otp || $otpExpired) {
+        jsonOutput(['success'=>false,'message'=>'OTP ไม่ถูกต้องหรือหมดอายุ'],401);
+    }
+
+    /* ───────────────────────────────────────────────
+     * 4) อัปเดตรหัสผ่าน + ลบ OTP (transaction เล็ก ๆ)
+     * ───────────────────────────────────────────── */
+    dbExec("BEGIN");
+
+    $hash = password_hash($pass, PASSWORD_ARGON2ID);
+    dbExec("UPDATE user SET password = ? WHERE email = ?", [$hash,$email]);
+    dbExec("DELETE FROM user_otp WHERE email = ?",          [$email]);
+
+    dbExec("COMMIT");
+
+    /* ───────────────────────────────────────────────
+     * 5) ดึงข้อมูลโปรไฟล์ตอบกลับ
+     * ───────────────────────────────────────────── */
+    $info = dbOne(
+        "SELECT profile_name, path_imgProfile
+           FROM user
+          WHERE email = ?
+          LIMIT 1", [$email]
+    ) ?: [];
+
+    jsonOutput([
+        'success'=>true,
+        'message'=>'เปลี่ยนรหัสผ่านสำเร็จ',
+        'data'=>[
+            'profile_name'    => $info['profile_name']    ?? '',
+            'path_imgProfile' => $info['path_imgProfile'] ?? ''
+        ]
+    ]);
+
+} catch (Throwable $e) {
+    // ถ้ามี transaction เปิดอยู่ → rollback ปลอดภัย
+    try { dbExec("ROLLBACK"); } catch(Throwable $x) {}
+    error_log('[new_password] '.$e->getMessage());
+    jsonOutput(['success'=>false,'message'=>'Server error'],500);
 }
-
-// 5) (ไม่ต้องเช็ค confirm_pass เพราะ UI ตรวจไปแล้ว)
-
-// 6) แฮชและอัปเดตตาราง user
-$hash = password_hash($newPassword, PASSWORD_ARGON2ID);
-$upd  = $pdo->prepare('UPDATE `user` SET password = ? WHERE email = ?');
-$ok   = $upd->execute([$hash, $email]);
-
-if (! $ok) {
-  http_response_code(500);
-  exit(json_encode(['success'=>false,'message'=>'อัปเดตข้อมูลล้มเหลว']));
-}
-
-// 7) ลบแถว OTP ทิ้ง เพื่อป้องกันใช้งานซ้ำ
-$pdo->prepare('DELETE FROM user_otp WHERE email = ?')->execute([$email]);
-
-// 8) ดึงข้อมูล profile_name, path_imgProfile กลับมาให้ UI บันทึก
-$userStmt = $pdo->prepare(
-  'SELECT profile_name, path_imgProfile FROM `user` WHERE email = ? LIMIT 1'
-);
-$userStmt->execute([$email]);
-$user = $userStmt->fetch(PDO::FETCH_ASSOC) ?: [];
-
-// 9) คืนผลลัพธ์สำเร็จ พร้อม data
-echo json_encode([
-  'success' => true,
-  'message' => 'เปลี่ยนรหัสผ่านสำเร็จ',
-  'data'    => [
-    'profile_name'    => $user['profile_name']    ?? '',
-    'path_imgProfile' => $user['path_imgProfile'] ?? '',
-  ],
-]);
-exit;

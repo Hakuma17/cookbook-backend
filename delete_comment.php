@@ -1,52 +1,38 @@
 <?php
-// delete_comment.php — ลบรีวิวของผู้ใช้ต่อสูตรที่ระบุ
-header('Content-Type: application/json; charset=UTF-8');
+// delete_comment.php — ผู้ใช้ลบรีวิวของตนเอง
+
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
-session_start();
+require_once __DIR__ . '/inc/db.php'; // เพิ่ม helper
 
-$userId   = getLoggedInUserId();
-$recipeId = intval($_POST['recipe_id'] ?? 0);
-
-if (!$userId) {
-    http_response_code(401);
-    echo json_encode(['success'=>false,'message'=>'ต้องล็อกอินก่อน'], JSON_UNESCAPED_UNICODE);
-    exit;
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
 }
+
+$userId   = requireLogin();
+$recipeId = filter_input(INPUT_POST, 'recipe_id', FILTER_VALIDATE_INT) ?: 0;
 if ($recipeId <= 0) {
-    http_response_code(400);
-    echo json_encode(['success'=>false,'message'=>'recipe_id ไม่ถูกต้อง'], JSON_UNESCAPED_UNICODE);
-    exit;
+    jsonOutput(['success' => false, 'message' => 'recipe_id ไม่ถูกต้อง'], 400);
 }
 
-// ลบแถวที่ตรงกับ user_id + recipe_id
-$stmt = $pdo->prepare("DELETE FROM review WHERE recipe_id = ? AND user_id = ?");
-$stmt->execute([$recipeId, $userId]);
+try {
+    /* 1) ลบรีวิว */
+    dbExec('DELETE FROM review WHERE recipe_id = ? AND user_id = ?', [$recipeId, $userId]);
 
-// ——————————————
-// รีคอล์ค average_rating และ nReviewer ในตาราง recipe
-$avgStmt = $pdo->prepare("
-    SELECT
-      AVG(rating)    AS avg_rating,
-      COUNT(*)       AS count_rating
-    FROM review
-    WHERE recipe_id = ?
-");
-$avgStmt->execute([$recipeId]);
-$avgRow = $avgStmt->fetch(PDO::FETCH_ASSOC);
-$avg   = floatval($avgRow['avg_rating']   ?? 0);
-$count = intval($avgRow['count_rating']  ?? 0);
+    /* 2) คำนวณ rating ใหม่ */
+    $row = dbOne('SELECT AVG(rating) AS avg, COUNT(*) AS cnt FROM review WHERE recipe_id = ?', [$recipeId]);
 
-$updRec = $pdo->prepare("
-    UPDATE recipe
-       SET average_rating = ?, nReviewer = ?
-     WHERE recipe_id = ?
-");
-$updRec->execute([round($avg, 2), $count, $recipeId]);
-// ——————————————
+    $avg   = round((float)($row['avg'] ?? 0), 2);
+    $count = (int)   ($row['cnt'] ?? 0);
 
-echo json_encode([
-    'success'        => true,
-    'average_rating' => round($avg, 2),
-    'review_count'   => $count
-], JSON_UNESCAPED_UNICODE);
+    dbExec('UPDATE recipe SET average_rating = ?, nReviewer = ? WHERE recipe_id = ?', [$avg, $count, $recipeId]);
+
+    jsonOutput(['success' => true, 'data' => [
+        'average_rating' => $avg,
+        'review_count'   => $count
+    ]]);
+
+} catch (Throwable $e) {
+    error_log('[delete_comment] ' . $e->getMessage());
+    jsonOutput(['success' => false, 'message' => 'Server error'], 500);
+}

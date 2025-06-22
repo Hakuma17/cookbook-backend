@@ -1,42 +1,25 @@
 <?php
-// google_login.php
-// ใช้ตรวจสอบ Google ID token และจัดการข้อมูลผู้ใช้ (login / register)
+// google_login.php — Sign in/Sign up ด้วย Google OAuth
 
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
-header('Content-Type: application/json; charset=UTF-8');
-session_start();
-
-require_once __DIR__ . '/vendor/autoload.php';
 require_once __DIR__ . '/inc/config.php';
+require_once __DIR__ . '/inc/functions.php';
+require_once __DIR__ . '/inc/db.php'; // เพิ่ม helper
+require_once __DIR__ . '/vendor/autoload.php';
 
 use Google\Client as Google_Client;
-use Firebase\JWT\JWT;
-JWT::$leeway = 300;
 
-/// ตอบกลับเป็น JSON โดยห่อใน data
-function respond(bool $ok, array $data = [], int $code = 200) {
-    if (ob_get_length()) ob_clean();
-    http_response_code($code);
-    echo json_encode([
-        'success' => $ok,
-        'message' => $ok ? 'สำเร็จ' : 'เกิดข้อผิดพลาด',
-        'data' => $data
-    ]);
-    exit;
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    respond(false, ['message' => 'Method not allowed'], 405);
+}
+
+$idToken = trim($_POST['id_token'] ?? '');
+if ($idToken === '') {
+    respond(false, ['message' => 'ID token required'], 400);
 }
 
 try {
-    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-        respond(false, ['message' => 'Method Not Allowed'], 405);
-    }
-
-    $idToken = $_POST['id_token'] ?? '';
-    if (!$idToken) {
-        respond(false, ['message' => 'ID token is required'], 400);
-    }
-
-    $client = new Google_Client(['client_id' => GOOGLE_CLIENT_ID]);
+    /* ──────────────────── 1) ตรวจสอบ Token ──────────────────── */
+    $client  = new Google_Client(['client_id' => GOOGLE_CLIENT_ID]);
     $payload = $client->verifyIdToken($idToken);
     if (!$payload) {
         respond(false, ['message' => 'Invalid ID token'], 401);
@@ -45,56 +28,61 @@ try {
     $googleId = $payload['sub'];
     $email    = $payload['email'];
     $name     = $payload['name'];
-    $picture  = $payload['picture'] ?? null;
+    $picture  = $payload['picture'] ?? '';
 
-    // ตรวจหาผู้ใช้ตาม google_id
-    $stmt = $pdo->prepare("SELECT user_id FROM user WHERE google_id = ?");
-    $stmt->execute([$googleId]);
+    $pdo = pdo(); // ใช้เฉพาะตรง lastInsertId()
 
-    if ($row = $stmt->fetch()) {
-        $userId = $row['user_id'];
-        $upd = $pdo->prepare("
-            UPDATE user 
-            SET profile_name = ?, path_imgProfile = ? 
+    /* ──────────────────── 2) มี google_id นี้แล้วหรือยัง ──────────────────── */
+    $row = dbOne("SELECT user_id FROM user WHERE google_id = ?", [$googleId]);
+
+    if ($row) {
+        $uid = (int) $row['user_id'];
+
+        dbExec("
+            UPDATE user
+            SET profile_name = ?, path_imgProfile = ?
             WHERE user_id = ?
-        ");
-        $upd->execute([$name, $picture, $userId]);
+        ", [$name, $picture, $uid]);
 
     } else {
-        $stmt2 = $pdo->prepare("SELECT user_id FROM user WHERE email = ?");
-        $stmt2->execute([$email]);
+        /* ──────────────────── 2.1) email นี้มีผู้ใช้ปกติแล้วหรือไม่ ──────────────────── */
+        $row = dbOne("SELECT user_id FROM user WHERE email = ?", [$email]);
 
-        if ($row2 = $stmt2->fetch()) {
-            $userId = $row2['user_id'];
-            $upd2 = $pdo->prepare("
-                UPDATE user 
-                SET google_id = ?, profile_name = ?, path_imgProfile = ? 
+        if ($row) {
+            $uid = (int) $row['user_id'];
+
+            dbExec("
+                UPDATE user
+                SET google_id = ?, profile_name = ?, path_imgProfile = ?
                 WHERE user_id = ?
-            ");
-            $upd2->execute([$googleId, $name, $picture, $userId]);
+            ", [$googleId, $name, $picture, $uid]);
 
         } else {
-            $ins = $pdo->prepare("
-                INSERT INTO user 
-                (email, password, google_id, profile_name, path_imgProfile, created_at)
-                VALUES (?, NULL, ?, ?, ?, NOW())
-            ");
-            $ins->execute([$email, $googleId, $name, $picture]);
-            $userId = $pdo->lastInsertId();
+            /* ──────────────────── 2.2) ลงทะเบียนใหม่ ──────────────────── */
+            dbExec("
+                INSERT INTO user(email, password, google_id, profile_name, path_imgProfile, created_at)
+                VALUES(?, NULL, ?, ?, ?, NOW())
+            ", [$email, $googleId, $name, $picture]);
+
+            $uid = (int) $pdo->lastInsertId(); // ต้องใช้ PDO ตรงนี้
         }
     }
 
-    $_SESSION['user_id'] = $userId;
+    /* ──────────────────── 3) ตั้งค่า Session ──────────────────── */
+    $_SESSION['user_id'] = $uid;
 
-    // ✅ สำคัญ: wrap ค่าทั้งหมดใน key 'data'
+    $imgUrl = preg_match('#^https?://#', $picture)
+        ? $picture
+        : getBaseUrl() . '/' . ltrim($picture, '/');
+
     respond(true, [
-        'user_id'         => (int) $userId,
+        'user_id'         => $uid,
         'email'           => $email,
         'profile_name'    => $name,
-        'path_imgProfile' => $picture ?? ''
+        'path_imgProfile' => $imgUrl,
     ]);
 
-} catch (\Throwable $e) {
-    error_log('google_login.php error: ' . $e->getMessage());
-    respond(false, ['message' => 'Server error: ' . $e->getMessage()], 500);
+} catch (Throwable $e) {
+    error_log('[google_login] ' . $e->getMessage());
+    respond(false, ['message' => 'Server error'], 500);
 }

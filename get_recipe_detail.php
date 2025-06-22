@@ -1,195 +1,140 @@
 <?php
-// get_recipe_detail.php
-// คืนรายละเอียดของสูตรอาหารตาม recipe_id (JSON)
-
-header('Content-Type: application/json; charset=UTF-8');
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
+// get_recipe_detail.php — คืน JSON { success, data }
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
-session_start();
+require_once __DIR__ . '/inc/db.php'; // เพิ่ม helper
+
+if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+    jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
+}
+
+$rid = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT) ?: 0;
+if ($rid <= 0) {
+    jsonOutput(['success' => false, 'message' => 'ต้องระบุ recipe_id'], 400);
+}
 
 try {
-    // 1) รับ recipe_id
-    $id = isset($_GET['id']) ? intval($_GET['id']) : 0;
-    if ($id <= 0) {
-        http_response_code(400);
-        echo json_encode(['error' => 'ต้องระบุ recipe_id']);
-        exit;
-    }
-
-    // 2) ดึงข้อมูลสูตรหลัก
-    $sql = "
-        SELECT
-            r.recipe_id,
-            r.name,
-            r.image_path,
-            r.prep_time,
-            r.nServings,
-            r.average_rating,
-            (SELECT COUNT(*) FROM review WHERE recipe_id = r.recipe_id) AS review_count,
-            r.created_at,
-            r.source_reference
-        FROM recipe r
-        WHERE r.recipe_id = ?
+    /** 1) ข้อมูลหลัก ********************************************************/
+    $row = dbOne("
+        SELECT recipe_id, name, image_path, prep_time, nServings,
+               average_rating,
+               (SELECT COUNT(*) FROM review WHERE recipe_id = ?) AS review_count,
+               created_at, source_reference
+        FROM recipe
+        WHERE recipe_id = ?
         LIMIT 1
-    ";
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute([$id]);
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (! $row) {
-        http_response_code(404);
-        echo json_encode(['error' => 'ไม่พบสูตรอาหาร']);
-        exit;
+    ", [$rid, $rid]);
+
+    if (!$row) {
+        jsonOutput(['success' => false, 'message' => 'ไม่พบสูตรอาหาร'], 404);
     }
 
-    // 3) คำนวณ URL รูปภาพ (fallback default_recipe.png)
-    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $baseUrl = rtrim("$scheme://{$_SERVER['HTTP_HOST']}" . dirname($_SERVER['SCRIPT_NAME']), '/');
-    $file = !empty($row['image_path']) ? $row['image_path'] : 'default_recipe.png';
-    $imageFile = function_exists('sanitize') ? sanitize($file) : $file;
-    $singleUrl = "$baseUrl/uploads/recipes/$imageFile";
+    /* base image */
+    $baseRec = getBaseUrl() . '/uploads/recipes';
+    $file    = $row['image_path'] ?: 'default_recipe.png';
+    $row['image_urls'] = ["{$baseRec}/" . basename($file)];
 
-    // 4) คืน image_urls เป็นอาเรย์เสมอ
-    $row['image_urls'] = [ $singleUrl ];
-    unset($row['image_url']); // ถ้ามีฟิลด์เดิม
-
-    // 5) ดึงรายการวัตถุดิบ
-    $sqlIng = "
-        SELECT
-            ri.ingredient_id,
-            i.name,
-            i.image_url,
-            ri.quantity,
-            ri.unit,
-            ri.grams_actual,
-            ri.descrip
+    /** 2) วัตถุดิบ ***********************************************************/
+    $row['ingredients'] = dbAll("
+        SELECT ri.ingredient_id, i.name, i.image_url, ri.quantity, ri.unit,
+               ri.grams_actual, ri.descrip
         FROM recipe_ingredient ri
-        JOIN ingredients i ON ri.ingredient_id = i.ingredient_id
+        JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
         WHERE ri.recipe_id = ?
         ORDER BY ri.id
-    ";
-    $stmtIng = $pdo->prepare($sqlIng);
-    $stmtIng->execute([$id]);
-    $row['ingredients'] = $stmtIng->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    ", [$rid]) ?: [];
 
-    // 6) ดึงขั้นตอนทำอาหาร
-    $sqlStep = "
+    /** 3) ขั้นตอน ************************************************************/
+    $row['steps'] = dbAll("
         SELECT step_number, description
         FROM step
         WHERE recipe_id = ?
         ORDER BY step_number
-    ";
-    $stmtStep = $pdo->prepare($sqlStep);
-    $stmtStep->execute([$id]);
-    $row['steps'] = $stmtStep->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    ", [$rid]) ?: [];
 
-    // 7) สรุปโภชนาการจากวัตถุดิบจริง
-    $sqlNutri = "
-        SELECT
-            SUM(n.energy_kcal * ri.grams_actual / 100) AS calories,
-            SUM(n.protein_g * ri.grams_actual / 100) AS protein,
-            SUM(n.fat_g * ri.grams_actual / 100) AS fat,
-            SUM(n.carbohydrate_g * ri.grams_actual / 100) AS carbs
+    /** 4) โภชนาการ **********************************************************/
+    $nut = dbOne("
+        SELECT SUM(n.energy_kcal * ri.grams_actual/100)      AS cal,
+               SUM(n.protein_g    * ri.grams_actual/100)      AS pro,
+               SUM(n.fat_g        * ri.grams_actual/100)      AS fat,
+               SUM(n.carbohydrate_g * ri.grams_actual/100)    AS carb
         FROM recipe_ingredient ri
-        JOIN ingredients i ON ri.ingredient_id = i.ingredient_id
-        JOIN nutrition n ON i.nutrition_id = n.nutrition_id
+        JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
+        JOIN nutrition   n ON n.nutrition_id = i.nutrition_id
         WHERE ri.recipe_id = ?
-    ";
-    $stmtNutri = $pdo->prepare($sqlNutri);
-    $stmtNutri->execute([$id]);
-    $nutri = $stmtNutri->fetch(PDO::FETCH_ASSOC);
+    ", [$rid]) ?: [];
 
-    // fallback = 0 ถ้าค่าเป็น null
     $row['nutrition'] = [
-        'calories' => round($nutri['calories'] ?? 0, 1),
-        'fat'      => round($nutri['fat'] ?? 0, 1),
-        'protein'  => round($nutri['protein'] ?? 0, 1),
-        'carbs'    => round($nutri['carbs'] ?? 0, 1),
+        'calories' => round((float)($nut['cal'] ?? 0), 1),
+        'protein'  => round((float)($nut['pro'] ?? 0), 1),
+        'fat'      => round((float)($nut['fat'] ?? 0), 1),
+        'carbs'    => round((float)($nut['carb'] ?? 0), 1),
     ];
 
-    // 8) favorite, user_rating, current_servings (ถ้า login)
-    $userId = function_exists('getLoggedInUserId') ? getLoggedInUserId() : null;
-    if ($userId) {
-        // favorite
-        $favStmt = $pdo->prepare(
-            "SELECT COUNT(*) FROM favorites WHERE recipe_id = ? AND user_id = ?"
-        );
-        $favStmt->execute([$id, $userId]);
-        $row['is_favorited'] = $favStmt->fetchColumn() > 0;
+    /** 5) ข้อมูลเฉพาะผู้ใช้ ***************************************************/
+    $uid = getLoggedInUserId();
+    $row += [
+        'is_favorited'     => false,
+        'user_rating'      => null,
+        'current_servings' => (int)($row['nServings'] ?? 1),
+        'has_allergy'      => false
+    ];
 
-        // user_rating
-        $urStmt = $pdo->prepare(
-            "SELECT rating FROM review WHERE recipe_id = ? AND user_id = ? LIMIT 1"
-        );
-        $urStmt->execute([$id, $userId]);
-        $row['user_rating'] = $urStmt->fetchColumn() ?: null;
+    if ($uid) {
+        $row['is_favorited'] = dbVal("
+            SELECT COUNT(*) FROM favorites WHERE recipe_id = ? AND user_id = ?
+        ", [$rid, $uid]) > 0;
 
-        // current_servings (ถ้าไม่มีใน cart ให้ default=1)
-        $cartStmt = $pdo->prepare("
-            SELECT nServings
-            FROM cart
-            WHERE recipe_id = ? AND user_id = ?
-            LIMIT 1
-        ");
-        $cartStmt->execute([$id, $userId]);
-        $row['current_servings'] = (int) ($cartStmt->fetchColumn() ?: $row['nServings']);
+        $row['user_rating'] = dbVal("
+            SELECT rating FROM review WHERE recipe_id = ? AND user_id = ? LIMIT 1
+        ", [$rid, $uid]) ?: null;
 
-    } else {
-        $row['is_favorited']     = false;
-        $row['user_rating']      = null;
-        $row['current_servings'] = 1;
+        $sv = dbVal("
+            SELECT nServings FROM cart WHERE recipe_id = ? AND user_id = ? LIMIT 1
+        ", [$rid, $uid]);
+        if (is_numeric($sv)) {
+            $row['current_servings'] = (int)$sv;
+        }
+
+        $row['has_allergy'] = dbVal("
+            SELECT COUNT(*) FROM recipe_ingredient
+            WHERE recipe_id = ? AND ingredient_id IN (
+                SELECT ingredient_id FROM allergyinfo WHERE user_id = ?
+            )
+        ", [$rid, $uid]) > 0;
     }
 
-    // 9) ดึงความคิดเห็น
-    $sqlCom = "
-        SELECT
-            r.user_id,
-            u.profile_name AS user_name,
-            u.path_imgProfile AS avatar_url,
-            r.rating,
-            r.comment,
-            r.created_at
+    /** 6) ความคิดเห็น *********************************************************/
+    $baseProf = getBaseUrl() . '/uploads/profiles';
+    $comments = dbAll("
+        SELECT r.user_id, u.profile_name AS user_name, u.path_imgProfile,
+               r.rating, r.comment, r.created_at
         FROM review r
         JOIN user u ON u.user_id = r.user_id
         WHERE r.recipe_id = ?
         ORDER BY r.created_at DESC
-    ";
-    $stmtCom = $pdo->prepare($sqlCom);
-    $stmtCom->execute([$id]);
-    $comments = $stmtCom->fetchAll(PDO::FETCH_ASSOC) ?: [];
-    $currentUserId = $_SESSION['user_id'] ?? null;
+    ", [$rid]) ?: [];
 
     foreach ($comments as &$c) {
-        $c['is_mine'] = ($currentUserId && $c['user_id'] == $currentUserId) ? 1 : 0;
+        $pf = $c['path_imgProfile'] ?: 'default_avatar.png';
+        $c['avatar_url'] = "{$baseProf}/" . basename($pf);
+        $c['is_mine']    = ($uid && $c['user_id'] == $uid) ? 1 : 0;
     }
     $row['comments'] = $comments;
 
-    // 10) ดึงหมวดหมู่
-    $sqlCat = "
+    /** 7) หมวดหมู่ ***********************************************************/
+    $row['categories'] = dbAll("
         SELECT c.category_name
         FROM category_recipe cr
-        JOIN category c ON cr.category_id = c.category_id
+        JOIN category c ON c.category_id = cr.category_id
         WHERE cr.recipe_id = ?
-    ";
-    $stmtCat = $pdo->prepare($sqlCat);
-    $stmtCat->execute([$id]);
-    $row['categories'] = array_column(
-        $stmtCat->fetchAll(PDO::FETCH_ASSOC),
-        'category_name'
-    );
+    ", [$rid], PDO::FETCH_COLUMN) ?: [];
 
-    // 11) คืน JSON ทั้งหมด
-    echo json_encode($row, JSON_UNESCAPED_UNICODE);
-    exit;
+    /** 8) ส่งกลับ ************************************************************/
+    jsonOutput(['success' => true, 'data' => $row]);
 
-} catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode([
-        'error'   => 'เกิดข้อผิดพลาด',
-        'message' => $e->getMessage()
-    ], JSON_UNESCAPED_UNICODE);
-    exit;
+} catch (Throwable $e) {
+    error_log('[recipe_detail] ' . $e->getMessage());
+    jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }

@@ -1,65 +1,54 @@
 <?php
-// post_rating.php
-// บันทึกหรืออัปเดตคะแนนดาว แล้วคำนวณ average ใหม่
+// post_rating.php — เก็บ/แก้ไขคะแนนดาวเฉย ๆ (ไม่บังคับ comment)
 
-header('Content-Type: application/json; charset=UTF-8');
-require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
-session_start();
+require_once __DIR__ . '/inc/db.php';
 
-$userId = getLoggedInUserId();
-if (! $userId) {
-    http_response_code(401);
-    echo json_encode(['success' => false, 'message' => 'ต้องล็อกอินก่อน'], JSON_UNESCAPED_UNICODE);
-    exit;
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
 }
 
-$recipeId = isset($_POST['recipe_id']) ? intval($_POST['recipe_id']) : 0;
-$rating   = isset($_POST['rating'])    ? floatval($_POST['rating']) : 0;
-if ($recipeId <= 0 || $rating <= 0) {
-    http_response_code(400);
-    echo json_encode(['success' => false, 'message' => 'ข้อมูลไม่ครบ'], JSON_UNESCAPED_UNICODE);
-    exit;
+$uid      = requireLogin();
+$recipeId = filter_input(INPUT_POST, 'recipe_id', FILTER_VALIDATE_INT) ?: 0;
+$rating   = filter_input(INPUT_POST, 'rating', FILTER_VALIDATE_FLOAT) ?: 0;
+
+if ($recipeId <= 0 || $rating < 1 || $rating > 5) {
+    jsonOutput(['success' => false, 'message' => 'ข้อมูลไม่ครบหรือคะแนนผิด'], 400);
 }
 
 try {
-    // อัปเดตหรือเพิ่มคะแนน
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM review WHERE recipe_id = ? AND user_id = ?");
-    $stmt->execute([$recipeId, $userId]);
-    if ($stmt->fetchColumn() > 0) {
-        $upd = $pdo->prepare("UPDATE review SET rating = ? WHERE recipe_id = ? AND user_id = ?");
-        $upd->execute([$rating, $recipeId, $userId]);
+    $exists = dbVal("SELECT 1 FROM review WHERE recipe_id = ? AND user_id = ?", [$recipeId, $uid]);
+
+    if ($exists) {
+        dbExec("
+            UPDATE review
+               SET rating = ?, created_at = NOW()
+             WHERE recipe_id = ? AND user_id = ?
+        ", [$rating, $recipeId, $uid]);
     } else {
-        $ins = $pdo->prepare("
+        dbExec("
             INSERT INTO review (recipe_id, user_id, rating, comment, created_at)
             VALUES (?, ?, ?, '', NOW())
-        ");
-        $ins->execute([$recipeId, $userId, $rating]);
+        ", [$recipeId, $uid, $rating]);
     }
 
-    // คำนวณ average_rating และ review_count ใหม่
-    $sqlAvg = "SELECT AVG(rating) AS avg_rating, COUNT(*) AS count_rating FROM review WHERE recipe_id = ?";
-    $stmtAvg = $pdo->prepare($sqlAvg);
-    $stmtAvg->execute([$recipeId]);
-    $avgRow = $stmtAvg->fetch(PDO::FETCH_ASSOC);
-    $avg   = floatval($avgRow['avg_rating']   ?? 0);
-    $count = intval($avgRow['count_rating']  ?? 0);
+    $row = dbOne("
+        SELECT AVG(rating) AS avg, COUNT(*) AS cnt
+        FROM review WHERE recipe_id = ?
+    ", [$recipeId]);
 
-    // ปรับลงในตาราง recipe
-    $updRec = $pdo->prepare("UPDATE recipe SET average_rating = ?, nReviewer = ? WHERE recipe_id = ?");
-    $updRec->execute([round($avg, 2), $count, $recipeId]);
+    dbExec("
+        UPDATE recipe SET average_rating = ?, nReviewer = ? WHERE recipe_id = ?
+    ", [round($row['avg'] ?? 0, 2), (int)($row['cnt'] ?? 0), $recipeId]);
 
-    echo json_encode([
+    jsonOutput([
         'success'        => true,
-        'average_rating' => round($avg, 2),
-        'review_count'   => $count,
+        'average_rating' => round($row['avg'] ?? 0, 2),
+        'review_count'   => (int)($row['cnt'] ?? 0),
         'user_rating'    => $rating,
-    ], JSON_UNESCAPED_UNICODE);
+    ]);
 
-} catch (Exception $e) {
-    http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'message' => 'เกิดข้อผิดพลาด: ' . $e->getMessage()
-    ], JSON_UNESCAPED_UNICODE);
+} catch (Throwable $e) {
+    error_log('[post_rating] ' . $e->getMessage());
+    jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }
