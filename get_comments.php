@@ -31,7 +31,7 @@ try {
 
     /* 2) ติด flag is_mine + ทำ URL รูปโปรไฟล์ให้เต็ม */
     $me = getLoggedInUserId();
-    $baseUrl = getBaseUrl() . '/uploads/profiles';
+    $baseUrl = getBaseUrl() . '/uploads/users';
 
     foreach ($rows as &$r) {
         $file = trim($r['avatar_url'] ?? '');
