@@ -16,7 +16,7 @@ try {
     $sql = "
         SELECT r.recipe_id, r.name, r.image_path, r.prep_time,
                COALESCE(AVG(rv.rating),0)  AS average_rating,
-               COUNT(rv.rating)            AS review_count,
+                (SELECT COUNT(*) FROM review rv2 WHERE rv2.recipe_id = r.recipe_id) AS review_count,
                GROUP_CONCAT(DISTINCT ri.descrip ORDER BY ri.ingredient_id
                             SEPARATOR ', ')                               AS short_ingredients,
                GROUP_CONCAT(DISTINCT ri.ingredient_id ORDER BY ri.ingredient_id
