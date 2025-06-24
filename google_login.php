@@ -1,10 +1,10 @@
 <?php
-// google_login.php — Sign in/Sign up ด้วย Google OAuth
+// google_login.php — Sign in / Sign up ด้วย Google OAuth
 
-require_once __DIR__ . '/inc/config.php';
-require_once __DIR__ . '/inc/functions.php';
-require_once __DIR__ . '/inc/db.php'; // เพิ่ม helper
-require_once __DIR__ . '/vendor/autoload.php';
+require_once __DIR__.'/inc/config.php';
+require_once __DIR__.'/inc/functions.php';
+require_once __DIR__.'/inc/db.php';
+require_once __DIR__.'/vendor/autoload.php';
 
 use Google\Client as Google_Client;
 
@@ -13,67 +13,52 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $idToken = trim($_POST['id_token'] ?? '');
-if ($idToken === '') {
-    respond(false, ['message' => 'ID token required'], 400);
-}
+if ($idToken === '') respond(false, ['message' => 'ID token required'], 400);
 
 try {
-    /* ──────────────────── 1) ตรวจสอบ Token ──────────────────── */
+    /* ── 1) verify token ── */
     $client  = new Google_Client(['client_id' => GOOGLE_CLIENT_ID]);
     $payload = $client->verifyIdToken($idToken);
-    if (!$payload) {
-        respond(false, ['message' => 'Invalid ID token'], 401);
-    }
+    if (!$payload) respond(false, ['message' => 'Invalid ID token'], 401);
 
     $googleId = $payload['sub'];
     $email    = $payload['email'];
     $name     = $payload['name'];
     $picture  = $payload['picture'] ?? '';
 
-    $pdo = pdo(); // ใช้เฉพาะตรง lastInsertId()
+    /* ── 2) UPSERT ผู้ใช้ ── */
+    $pdo = pdo();
+    $pdo->beginTransaction();
 
-    /* ──────────────────── 2) มี google_id นี้แล้วหรือยัง ──────────────────── */
-    $row = dbOne("SELECT user_id FROM user WHERE google_id = ?", [$googleId]);
+    // 2.1 มี user อยู่แล้วหรือไม่
+    $uid = dbOne("SELECT user_id FROM user WHERE google_id=? OR email=?", 
+                 [$googleId, $email])['user_id'] ?? null;
 
-    if ($row) {
-        $uid = (int) $row['user_id'];
-
+    if ($uid) {
+        // update
         dbExec("
             UPDATE user
-            SET profile_name = ?, path_imgProfile = ?
-            WHERE user_id = ?
-        ", [$name, $picture, $uid]);
-
+               SET google_id = :gid, profile_name=:name, path_imgProfile=:pic
+             WHERE user_id   = :uid
+        ", ['gid'=>$googleId,'name'=>$name,'pic'=>$picture,'uid'=>$uid]);
     } else {
-        /* ──────────────────── 2.1) email นี้มีผู้ใช้ปกติแล้วหรือไม่ ──────────────────── */
-        $row = dbOne("SELECT user_id FROM user WHERE email = ?", [$email]);
-
-        if ($row) {
-            $uid = (int) $row['user_id'];
-
-            dbExec("
-                UPDATE user
-                SET google_id = ?, profile_name = ?, path_imgProfile = ?
-                WHERE user_id = ?
-            ", [$googleId, $name, $picture, $uid]);
-
-        } else {
-            /* ──────────────────── 2.2) ลงทะเบียนใหม่ ──────────────────── */
-            dbExec("
-                INSERT INTO user(email, password, google_id, profile_name, path_imgProfile, created_at)
-                VALUES(?, NULL, ?, ?, ?, NOW())
-            ", [$email, $googleId, $name, $picture]);
-
-            $uid = (int) $pdo->lastInsertId(); // ต้องใช้ PDO ตรงนี้
-        }
+        // insert (ให้ password = '' ไม่ null)
+        dbExec("
+            INSERT INTO user(email,password,google_id,profile_name,path_imgProfile,created_at)
+            VALUES(:email,'',:gid,:name,:pic,NOW())
+        ", ['email'=>$email,'gid'=>$googleId,'name'=>$name,'pic'=>$picture]);
+        $uid = (int)$pdo->lastInsertId();
     }
 
-    /* ──────────────────── 3) ตั้งค่า Session ──────────────────── */
+    $pdo->commit();
+
+    /* ── 3) start session แล้วส่งกลับ ── */
+    if (session_status() === PHP_SESSION_NONE) session_start();
     $_SESSION['user_id'] = $uid;
 
     $imgUrl = preg_match('#^https?://#', $picture)
-        ? $picture
-        : getBaseUrl() . '/' . ltrim($picture, '/');
+              ? $picture
+              : getBaseUrl().'/'.ltrim($picture,'/');
 
     respond(true, [
         'user_id'         => $uid,
@@ -83,6 +68,7 @@ try {
     ]);
 
 } catch (Throwable $e) {
-    error_log('[google_login] ' . $e->getMessage());
-    respond(false, ['message' => 'Server error'], 500);
+    if ($pdo?->inTransaction()) $pdo->rollBack();
+    error_log('[google_login] '.$e->getMessage());
+    respond(false, ['message'=>'Server error'], 500);
 }
