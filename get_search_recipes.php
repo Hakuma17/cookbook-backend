@@ -41,8 +41,8 @@ try {
     if (!is_array($incRaw)) $incRaw = [$incRaw];
     if (!is_array($excRaw)) $excRaw = [$excRaw];
 
-    $includeIds = array_map('intval', $incRaw);
-    $excludeIds = array_map('intval', $excRaw);
+    $includeIds = array_filter(array_map('intval', $incRaw));
+    $excludeIds = array_filter(array_map('intval', $excRaw));
 
     /* 1.1 แปลงชื่อ ingredients → id */
     if (!empty($p['ingredients'])) {
