@@ -10,19 +10,34 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $userId      = requireLogin();
-$oldPassword = $_POST['old_password'] ?? '';
-$newPassword = $_POST['new_password'] ?? '';
+$oldPassword = trim($_POST['old_password'] ?? '');
+$newPassword = trim($_POST['new_password'] ?? '');
 
 if ($oldPassword === '' || $newPassword === '') {
     jsonOutput(['success' => false, 'message' => 'กรุณาระบุรหัสผ่านเก่าและใหม่'], 400);
+}
+
+// ป้องกัน new password สั้นเกินไป
+if (strlen($newPassword) < 8) {
+    jsonOutput(['success' => false, 'message' => 'รหัสผ่านใหม่ต้องมีอย่างน้อย 8 ตัว'], 400);
 }
 
 try {
     /* ──────────────────── 1) ตรวจสอบรหัสผ่านเดิม ──────────────────── */
     $hash = dbVal("SELECT password FROM user WHERE user_id = ?", [$userId]);
 
-    if (!$hash || !password_verify($oldPassword, $hash)) {
+    if (!$hash) {
+        error_log("[change_password] User ID {$userId} not found");
+        jsonOutput(['success' => false, 'message' => 'ไม่สามารถเปลี่ยนรหัสผ่าน'], 500);
+    }
+
+    if (!password_verify($oldPassword, $hash)) {
         jsonOutput(['success' => false, 'message' => 'รหัสผ่านปัจจุบันไม่ถูกต้อง'], 401);
+    }
+
+    // ป้องกันการตั้งรหัสเดิมซ้ำ
+    if (password_verify($newPassword, $hash)) {
+        jsonOutput(['success' => false, 'message' => 'รหัสผ่านใหม่ต้องไม่ซ้ำกับของเดิม'], 400);
     }
 
     /* ──────────────────── 2) อัปเดตรหัสผ่านใหม่ ──────────────────── */
