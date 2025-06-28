@@ -11,8 +11,9 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 // ─── 2) รับ & validate input ─────────────────────────
-$email = sanitize($_POST['email']        ?? '');
-$otp   = sanitize($_POST['otp']          ?? '');
+// ⛑ เพิ่ม trim เพื่อกันช่องว่างเผลอพิมพ์
+$email = trim(sanitize($_POST['email']        ?? ''));
+$otp   = trim(sanitize($_POST['otp']          ?? ''));
 $pass  =            $_POST['new_password'] ?? '';   // ไม่ต้อง sanitize hash
 
 if ($email==='' || $otp==='' || $pass==='') {
