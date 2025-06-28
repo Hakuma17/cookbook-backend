@@ -1,17 +1,13 @@
 <?php
-/**
- * inc/db.php
- * -----------------------------------------------------------------------------
- * PDO helper wrappers – ลด pattern prepare ▸ execute ▸ fetch*
- *
- * ต้อง include หลังจาก inc/functions.php (ซึ่งนิยาม pdo() เอาไว้แล้ว)
- *
- *  - dbAll($sql, $params)   → array  (fetchAll)
- *  - dbOne($sql, $params)   → mixed   (fetch row)
- *  - dbVal($sql, $params)   → mixed   (fetchColumn)
- *  - dbExec($sql, $params)  → int     (rowCount) – สำหรับ INSERT/UPDATE/DELETE
- * -----------------------------------------------------------------------------
- */
+// inc/db.php
+
+// ถ้ายังไม่ได้ include functions.php → include เลย
+if (!function_exists('pdo')) {
+    require_once __DIR__ . '/functions.php';
+}
+
+// ───────────── PDO wrapper functions ─────────────
+
 
 if (!function_exists('dbAll')) {
     function dbAll(string $sql, array $params = [], int $mode = PDO::FETCH_ASSOC): array
