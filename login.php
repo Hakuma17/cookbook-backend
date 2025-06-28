@@ -9,7 +9,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(false, ['message' => 'Method not allowed'], 405);
 }
 
-$email = sanitize($_POST['email'] ?? '');
+// ⛑ เพิ่ม trim ป้องกันอีเมลมีช่องว่างเผลอพิมพ์
+$email = trim(sanitize($_POST['email'] ?? ''));
 $pass  = $_POST['password'] ?? '';
 
 // ตรวจว่ากรอกครบไหม

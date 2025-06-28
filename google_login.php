@@ -21,10 +21,15 @@ try {
     $payload = $client->verifyIdToken($idToken);
     if (!$payload) respond(false, ['message' => 'Invalid ID token'], 401);
 
-    $googleId = $payload['sub'];
-    $email    = $payload['email'];
-    $name     = $payload['name'];
-    $picture  = $payload['picture'] ?? '';
+    $googleId = $payload['sub']        ?? '';
+    $email    = trim($payload['email'] ?? '');
+    $name     = trim($payload['name']  ?? '');
+    $picture  = trim($payload['picture'] ?? '');
+
+    // ป้องกัน email, name ขาดหาย
+    if ($googleId === '' || $email === '' || $name === '') {
+        respond(false, ['message' => 'Incomplete user data from Google'], 400);
+    }
 
     /* ── 2) UPSERT ผู้ใช้ ── */
     $pdo = pdo();
@@ -68,7 +73,7 @@ try {
     ]);
 
 } catch (Throwable $e) {
-    if ($pdo?->inTransaction()) $pdo->rollBack();
+    if (isset($pdo) && $pdo?->inTransaction()) $pdo->rollBack();
     error_log('[google_login] '.$e->getMessage());
     respond(false, ['message'=>'Server error'], 500);
 }
