@@ -1,20 +1,5 @@
 <?php
-/**
- * get_search_recipes.php
- * ------------------------------------------------------------------
- *  พารามิเตอร์ (GET / POST)
- *    q              : keyword (optional)
- *    sort           : popular | trending | latest | recommended
- *    cat_id         : category id     (optional)
- *    include_ids[]  : ingredient ids “ต้องมี”   (optional)
- *    exclude_ids[]  : ingredient ids “ต้องไม่มี” (optional)
- *    ingredients    : ชื่อวัตถุดิบคั่น "," หรือเว้นวรรค  →  ต้อง “มีครบทุกคำ”
- *    page / limit   : paging ( default limit = 26 )
- * ------------------------------------------------------------------
- *  • เพิ่มคอลัมน์  favorite_count  เสมอในการ SELECT
- *  • ถ้า param  ingredients  ถูกส่งมา (เช่น  “กุ้ง,กระเทียม” หรือ “กุ้ง กระเทียม”)
- *    → จะแยกเป็น token และค้นหาเฉพาะสูตรที่มีวัตถุดิบครบทุก token
- */
+
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
 require_once __DIR__ . '/inc/json.php';
@@ -23,136 +8,218 @@ require_once __DIR__ . '/inc/db.php';
 header('Content-Type: application/json; charset=UTF-8');
 
 try {
-    /* ───────────── 1) รับและตรวจพารามิเตอร์ ───────────── */
-    $p = ($_SERVER['REQUEST_METHOD'] === 'POST') ? $_POST : $_GET;
+    $p       = ($_SERVER['REQUEST_METHOD'] === 'POST') ? $_POST : $_GET;
+    $q       = sanitize($p['q'] ?? '');
+    $qNoSpc  = preg_replace('/\s+/u', '', $q);
+    $sort    = strtolower(trim($p['sort'] ?? 'latest'));
+    $catId   = isset($p['cat_id']) && $p['cat_id'] !== '' ? (int)$p['cat_id'] : null;
+    $page    = max(1, (int)($p['page']  ?? 1));
+    $limit   = max(1, min(50, (int)($p['limit'] ?? 26)));
+    $offset  = ($page - 1) * $limit;
 
-    $q      = sanitize($p['q'] ?? '');
-    $sort   = strtolower(trim($p['sort'] ?? 'latest'));
-    $catId  = isset($p['cat_id']) && $p['cat_id'] !== '' ? (int)$p['cat_id'] : null;
-
-    $page   = max(1, (int)($p['page']  ?? 1));
-    $limit  = max(1, min(50, (int)($p['limit'] ?? 26)));
-    $offset = ($page - 1) * $limit;
-
-    /* include / exclude ids */
-    $incRaw = $p['include_ids'] ?? [];
-    $excRaw = $p['exclude_ids'] ?? [];
+    $incRaw     = $p['include_ids'] ?? [];
+    $excRaw     = $p['exclude_ids'] ?? [];
     if (!is_array($incRaw)) $incRaw = [$incRaw];
     if (!is_array($excRaw)) $excRaw = [$excRaw];
     $includeIds = array_filter(array_map('intval', $incRaw));
     $excludeIds = array_filter(array_map('intval', $excRaw));
 
-    /* extra ingredient-names filter (ต้อง “มีครบทุกคำ”) */
     $tokens = [];
     if (!empty($p['ingredients'])) {
-        // แยกด้วย , / ; / เว้นวรรคหลาย ๆ ช่อง
         $tokens = preg_split('/[,\s;]+/u', $p['ingredients'], -1, PREG_SPLIT_NO_EMPTY);
         $tokens = array_map('trim', $tokens);
     }
 
-    /* validation */
     $qLen = mb_strlen($q);
-    if ($qLen > 100) jsonError('คำค้นหายาวเกินไป', 400);
-    if ($qLen > 0 && $qLen < 2) jsonError('กรุณาใส่คำค้นอย่างน้อย 2 ตัวอักษร', 400);
+    if ($qLen > 100)              jsonError('คำค้นหายาวเกินไป', 400);
+    if ($qLen > 0 && $qLen < 2)   jsonError('กรุณาใส่คำค้นอย่างน้อย 2 ตัวอักษร', 400);
 
-    if (
-        $qLen === 0 &&
-        $catId === null &&
-        !$includeIds && !$tokens   // ไม่มี filter ใดเลย
-    ) {
-        jsonOutput(['success' => true, 'page' => $page, 'data' => []]);
-    }
-
-    /* ───────────── 2) user id (optional) ───────────── */
     $userId = getLoggedInUserId();
 
-    /* ───────────── 3) สร้าง SQL ───────────── */
-    $sql  = "SELECT r.*, IFNULL(r.favorite_count,0) AS favorite_count
-               FROM recipe r";
+    $select = "
+      SELECT DISTINCT
+        r.recipe_id AS recipe_id,
+        r.recipe_id AS id,
+        r.name,
+        r.image_path,
+        r.prep_time,
+        r.average_rating,
+        (SELECT COUNT(*) FROM favorites f WHERE f.recipe_id = r.recipe_id) AS favorite_count,
+        (SELECT COUNT(*) FROM review    v WHERE v.recipe_id = r.recipe_id) AS review_count,
+        (SELECT GROUP_CONCAT(DISTINCT
+                 CASE
+                   WHEN ri.descrip IS NOT NULL AND ri.descrip <> '' THEN ri.descrip
+                   ELSE i.display_name
+                 END
+                 SEPARATOR ', ')
+           FROM recipe_ingredient ri
+           JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
+          WHERE ri.recipe_id = r.recipe_id) AS short_ingredients,
+        (SELECT GROUP_CONCAT(DISTINCT ri.ingredient_id)
+           FROM recipe_ingredient ri
+          WHERE ri.recipe_id = r.recipe_id) AS ingredient_ids";
 
-    /* (3.1) JOIN ตรวจ ingredient tokens (ต้องมีครบ) */
+    $selectNameRank  = '';
+    $paramsNameRank  = [];
+    if ($qLen) {
+        $selectNameRank = ",
+        (CASE
+           WHEN r.name = :q_exact                          THEN 3
+           WHEN REPLACE(r.name,' ','') = :q_exact_nospace  THEN 2
+           WHEN r.name LIKE :q_prefix                      THEN 1
+           ELSE 0
+         END) AS name_rank";
+        $paramsNameRank = [
+            ':q_exact'         => $q,
+            ':q_exact_nospace' => $qNoSpc,
+            ':q_prefix'        => $q . '%',
+        ];
+    }
+
+    $sql    = $select . $selectNameRank . "\nFROM recipe r";
     $params = [];
+
     if ($tokens) {
         $i = 0;
         foreach ($tokens as $t) {
-            // sub-query เช็กว่ามี ingredient ที่ชื่อแบบ loose-match
-            $alias = 't' . (++$i);
-            $sql  .= " INNER JOIN recipe_ingredients AS $alias
-                          ON $alias.recipe_id = r.id
-                         AND $alias.ingredient_name LIKE ?";
-            $params[] = '%' . $t . '%';
+            $aliasRI  = 't' . (++$i);
+            $aliasIng = 'ing' . $i;
+            $sql .= "
+              INNER JOIN recipe_ingredient AS $aliasRI
+                     ON $aliasRI.recipe_id = r.recipe_id
+              INNER JOIN ingredients AS $aliasIng
+                     ON $aliasIng.ingredient_id = $aliasRI.ingredient_id
+                    AND (
+                          $aliasRI.descrip               LIKE ?
+                       OR $aliasIng.name                LIKE ?
+                       OR $aliasIng.display_name        LIKE ?
+                       OR $aliasIng.searchable_keywords LIKE ?
+                    )";
+            $like = '%' . $t . '%';
+            array_push($params, $like, $like, $like, $like);
         }
     }
 
-    /* (3.2) include / exclude ids */
     if ($includeIds) {
-        $inMarks = implode(',', array_fill(0, count($includeIds), '?'));
-        $sql .= " INNER JOIN recipe_ingredients inc
-                    ON inc.recipe_id = r.id
-                   AND inc.ingredient_id IN ($inMarks)";
+        $marks = implode(',', array_fill(0, count($includeIds), '?'));
+        $sql .= "
+          INNER JOIN recipe_ingredient inc
+                  ON inc.recipe_id = r.recipe_id
+                 AND inc.ingredient_id IN ($marks)";
         $params = array_merge($params, $includeIds);
     }
-    if ($excludeIds) {
-        $notMarks = implode(',', array_fill(0, count($excludeIds), '?'));
-        $sql .= " WHERE r.id NOT IN (
-                     SELECT recipe_id
-                       FROM recipe_ingredients
-                      WHERE ingredient_id IN ($notMarks)
-                  )";
-        $params = array_merge($params, $excludeIds);
-    } else {
-        $sql .= $excludeIds ? '' : ' WHERE 1';   // ถ้ายังไม่มี WHERE ให้ตั้งต้น
+
+    $sql .= $excludeIds
+        ? " WHERE r.recipe_id NOT IN (
+               SELECT recipe_id FROM recipe_ingredient WHERE ingredient_id IN (" . implode(',', array_fill(0, count($excludeIds), '?')) . ")
+           )"
+        : ' WHERE 1';
+    $params = array_merge($params, $excludeIds);
+
+    if ($qLen) {
+        $sql .= "
+          AND (
+                r.name = ?
+             OR REPLACE(r.name,' ','') = ?
+             OR r.name LIKE ?
+             OR REPLACE(r.name,' ','') LIKE ?
+          )";
+        array_push($params, $q, $qNoSpc, "%{$q}%", "%{$qNoSpc}%");
     }
 
-    /* (3.3) keyword / category */
-    if ($qLen) {
-        $sql .= " AND r.name LIKE ?";
-        $params[] = '%' . $q . '%';
-    }
     if ($catId !== null) {
-        $sql .= " AND r.category_id = ?";
+        $sql .= "
+          AND EXISTS (
+            SELECT 1
+              FROM category_recipe cr
+             WHERE cr.recipe_id = r.recipe_id
+               AND cr.category_id = ?
+          )";
         $params[] = $catId;
     }
 
-    /* (3.4) sorting */
-    switch ($sort) {
-        case 'popular':
-            $sql .= " ORDER BY r.favorite_count DESC";
-            break;
-        case 'trending':
-            $sql .= " ORDER BY r.created_at DESC, r.favorite_count DESC";
-            break;
-        case 'recommended':
-            $sql .= " ORDER BY r.average_rating DESC, r.review_count DESC";
-            break;
-        default: /* latest */
-            $sql .= " ORDER BY r.created_at DESC";
+    $orderTrail   = match ($sort) {
+        'popular'     => 'favorite_count DESC',
+        'trending'    => 'r.created_at DESC, favorite_count DESC',
+        'recommended' => 'r.average_rating DESC, review_count DESC',
+        default       => 'r.created_at DESC',
+    };
+    $orderNameRank = $qLen ? 'name_rank DESC,' : '';
+
+    $sql .= "
+      ORDER BY {$orderNameRank} {$orderTrail}
+      LIMIT {$limit} OFFSET {$offset}";
+
+    $params = array_merge($paramsNameRank, $params);
+    $rows   = dbAll($sql, $params);
+
+    $base   = getBaseUrl() . '/uploads/recipes';
+    $mapRow = function($r) use ($base) {
+        return [
+            'recipe_id'         => (int)$r['recipe_id'],
+            'id'                => (int)$r['id'],
+            'name'              => $r['name'],
+            'image_url'         => $r['image_path']
+                                      ? $base . '/' . basename($r['image_path'])
+                                      : $base . '/default_recipe.png',
+            'favorite_count'    => (int)$r['favorite_count'],
+            'average_rating'    => (float)$r['average_rating'],
+            'review_count'      => (int)$r['review_count'],
+            'prep_time'         => $r['prep_time'] !== null ? (int)$r['prep_time'] : null,
+            'short_ingredients' => $r['short_ingredients'],
+            'ingredient_ids'    => array_filter(array_map('intval',
+                                           explode(',', $r['ingredient_ids'] ?? ''))),
+        ];
+    };
+    $data = array_map($mapRow, $rows);
+
+    // ===== Fallback 1: แยกคำค้นหาแล้วลองหาในชื่อสูตร
+    if (empty($data) && $qLen > 0) {
+        $qWords = preg_split('/\s+/u', $q, -1, PREG_SPLIT_NO_EMPTY);
+        $qWords = array_filter($qWords, fn($s) => mb_strlen($s) >= 2);
+        if ($qWords) {
+            $likeConds = implode(' AND ', array_fill(0, count($qWords), 'r.name LIKE ?'));
+            $paramsFb = array_map(fn($w) => '%' . $w . '%', $qWords);
+            $sqlFb = "
+              SELECT DISTINCT r.*
+                FROM recipe r
+               WHERE {$likeConds}
+               ORDER BY r.created_at DESC
+               LIMIT {$limit} OFFSET {$offset}";
+            $rowsFb = dbAll($sqlFb, $paramsFb);
+            $data = array_map($mapRow, $rowsFb);
+        }
     }
 
-    $sql .= " LIMIT $limit OFFSET $offset";
+    // ===== Fallback 2: ถ้ายังว่างอีก → หาในวัตถุดิบ
+    if (empty($data) && $qLen > 0) {
+        $stmtFb = pdo()->prepare("
+            SELECT ingredient_id
+              FROM ingredients
+             WHERE :qNos LIKE CONCAT('%', REPLACE(name,' ',''), '%')
+                OR :qNos LIKE CONCAT('%', REPLACE(display_name,' ',''), '%')
+        ");
+        $stmtFb->execute([':qNos' => $qNoSpc]);
+        $ingFbIds = array_map('intval', $stmtFb->fetchAll(PDO::FETCH_COLUMN));
+        if ($ingFbIds) {
+            $marksFb   = implode(',', array_fill(0, count($ingFbIds), '?'));
+            $sqlFb     = "
+              SELECT DISTINCT r.*
+                FROM recipe r
+                JOIN recipe_ingredient ri ON ri.recipe_id = r.recipe_id
+               WHERE ri.ingredient_id IN ($marksFb)
+               ORDER BY r.created_at DESC
+               LIMIT ? OFFSET ?";
+            $paramsFb = array_merge($ingFbIds, [$limit, $offset]);
+            $rowsFb   = dbAll($sqlFb, $paramsFb);
+            $data     = array_map($mapRow, $rowsFb);
+        }
+    }
 
-    /* ───────────── 4) query DB ───────────── */
-    $rows = dbAll($sql, $params);
-
-    /* แปลงเป็น array-friendly (int/float ให้ถูกชนิด) */
-    $data = array_map(function ($r) {
-        return [
-            'id'              => (int)$r['id'],
-            'name'            => $r['name'],
-            'image_url'       => $r['image_url'],
-            'favorite_count'  => (int)$r['favorite_count'],   // ★ ส่งกลับ!
-            'average_rating'  => (float)$r['average_rating'],
-            'review_count'    => (int)$r['review_count'],
-            'prep_time'       => (int)$r['prep_time'],
-        ];
-    }, $rows);
-
-    /* ───────────── 5) response ───────────── */
     jsonOutput([
         'success' => true,
         'page'    => $page,
         'data'    => $data,
-        // 'debug' => ['sql' => $sql, 'params' => $params]  // เปิดได้ตอน dev
     ]);
 
 } catch (Throwable $e) {
