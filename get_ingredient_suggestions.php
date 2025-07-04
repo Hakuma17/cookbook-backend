@@ -1,56 +1,52 @@
 <?php
+
+
+declare(strict_types=1);
 require_once __DIR__ . '/inc/db.php';
-require_once __DIR__ . '/inc/config.php';
-require_once __DIR__ . '/inc/functions.php';
 
 header('Content-Type: application/json; charset=UTF-8');
 
+/*── helper ────────────*/
+function out(bool $ok, array $data = [], string $err = ''): never
+{
+    echo json_encode(
+        ['success' => $ok, 'data' => $data] + ($ok ? [] : ['error' => $err]),
+        JSON_UNESCAPED_UNICODE
+    );
+    exit;
+}
+
 try {
+    /* 1)  รับ term */
     $term = trim($_GET['term'] ?? '');
-    if ($term === '') {
-        echo json_encode(['success' => true, 'data' => []]);
-        exit;
-    }
+    if ($term === '') out(true);
 
-    $like = "%{$term}%";
+    $like = '%' . $term . '%';
 
-    // ─── 1) ดึงคำเบื้องต้นจาก 3 แหล่ง ───
-    $sql1 = "
-        SELECT DISTINCT display_name AS name FROM ingredients
-        WHERE display_name LIKE :t1 OR searchable_keywords LIKE :t2
+    /* 2)  query descrip */
+    $sql = "
+        SELECT DISTINCT descrip
+        FROM recipe_ingredient
+        WHERE descrip <> ''
+          AND descrip COLLATE utf8mb4_general_ci LIKE :kw
+        LIMIT 100
     ";
-    $names1 = dbAll($sql1, [':t1' => $like, ':t2' => $like], PDO::FETCH_COLUMN);
+    $rows = dbAll($sql, [':kw' => $like], PDO::FETCH_COLUMN);
+    if (!$rows) out(true);
 
-    $sql2 = "
-        SELECT DISTINCT descrip AS name FROM recipe_ingredient
-        WHERE descrip IS NOT NULL AND descrip <> '' AND descrip LIKE :t3
-    ";
-    $names2 = dbAll($sql2, [':t3' => $like], PDO::FETCH_COLUMN);
-
-    $sql3 = "
-        SELECT DISTINCT descrip AS name FROM ingredients
-        WHERE descrip IS NOT NULL AND descrip <> '' AND descrip LIKE :t4
-    ";
-    $names3 = dbAll($sql3, [':t4' => $like], PDO::FETCH_COLUMN);
-
-    // ─── 2) รวมทั้งหมด ───
-    $allRaw = array_unique(array_merge($names1, $names2, $names3));
-
-    // ─── 3) จัดอันดับความคล้ายด้วย levenshtein ───
-    $ranked = [];
-    foreach ($allRaw as $name) {
-        $score = levenshtein(mb_strtolower($term), mb_strtolower($name));
-        $ranked[] = ['name' => $name, 'score' => $score];
-    }
-
-    // ─── 4) เรียงจากใกล้ที่สุด → ไกลที่สุด ───
+    /* 3)  คำนวณคะแนน levenshtein */
+    $q = mb_strtolower($term);
+    $ranked = array_map(
+        fn($n) => ['name' => $n, 'score' => levenshtein($q, mb_strtolower($n))],
+        $rows
+    );
     usort($ranked, fn($a, $b) => $a['score'] <=> $b['score']);
 
-    // ─── 5) ตัดเหลือ 10 อันดับแรก ───
-    $topNames = array_column(array_slice($ranked, 0, 10), 'name');
+    /* 4)  ส่งกลับ 10 อันดับแรก */
+    $top = array_column(array_slice($ranked, 0, 10), 'name');
+    out(true, $top);
 
-    echo json_encode(['success' => true, 'data' => $topNames]);
 } catch (Throwable $e) {
-    error_log("suggestions error: " . $e->getMessage());
-    echo json_encode(['success' => false, 'data' => [], 'error' => 'Server error']);
+    error_log('[ingredient_suggest] ' . $e->getMessage());
+    out(false, [], 'Server error');
 }
