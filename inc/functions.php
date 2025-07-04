@@ -8,7 +8,7 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-/* ─────────  PDO ───────── */
+/* ───────── 1. PDO ───────── */
 $__pdo = null;
 function pdo(): PDO
 {
@@ -21,37 +21,28 @@ function pdo(): PDO
             [
                 PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES   => false,     // ✨ เพิ่ม
+                PDO::ATTR_EMULATE_PREPARES   => false,
             ]
         );
     }
     return $__pdo;
 }
 
-/* ───────── Helpers ───────── */
+/* ───────── 2. Helpers (ทั่วไป) ───────── */
 function sanitize(string $v): string
 {
-    return trim($v);  // ✨ ไม่ escape HTML เพื่อให้ LIKE ตรงเป๊ะ
+    return trim($v);   // ไม่ escape HTML เพื่อให้ LIKE ตรงเป๊ะ
 }
 
 function getBaseUrl(): string
 {
-    // สร้าง scheme พร้อม "://"
     $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https://' : 'http://';
     $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
-
-    // dirname(...) คืน path ของสคริปต์ปัจจุบัน (เช่น /cookbookapp)
     $dir    = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/');
-
-    // กลับมาเป็น URL เต็ม ไม่ลด "://"
     return rtrim($scheme . $host . $dir, '/');
 }
 
-function getLoggedInUserId(): ?int
-{
-    return $_SESSION['user_id'] ?? null;
-}
-
+function getLoggedInUserId(): ?int        { return $_SESSION['user_id'] ?? null; }
 function requireLogin(): int
 {
     $uid = getLoggedInUserId();
@@ -68,4 +59,43 @@ function respond(bool $ok, array $data = [], int $code = 200): void
         'message' => $ok ? 'ดำเนินการสำเร็จ' : ($data['message'] ?? 'เกิดข้อผิดพลาด'),
         'data'    => $ok ? $data : (object)[],
     ], $code);
+}
+
+/* ───────────────── 3. Thai tokenizer (PyThaiNLP) ───────────────── */
+/**
+ * เรียกสคริปต์ Python (PyThaiNLP newmm) เพื่อแตกคำไทย
+ * @param string $q  สตริง UTF-8 จากผู้ใช้
+ * @return string[]  tokens ไม่เกิน 5 คำ; ถ้า error → []
+ */
+function thaiTokens(string $q): array
+{
+    static $cmd = null;                     // cache คำสั่ง
+
+    if ($cmd === null) {
+        // ระบุ path python & สคริปต์ให้ชัด (ปรับตามโครงจริงถ้าแตกต่าง)
+        $script = __DIR__ . '/../scripts/thai_tokenize.py';
+        $python = 'python';                 // หรือ python3 / path เต็ม
+        $cmd    = $python . ' -X utf8 ' . escapeshellarg($script);
+    }
+
+    $descs = [
+        0 => ['pipe', 'r'],   // STDIN
+        1 => ['pipe', 'w'],   // STDOUT
+        2 => ['pipe', 'w'],   // STDERR
+    ];
+    $proc = proc_open($cmd, $descs, $pipes, null, null, ['timeout' => 1]);
+    if (!is_resource($proc)) {
+        return [];
+    }
+
+    fwrite($pipes[0], $q);
+    fclose($pipes[0]);
+
+    $json = stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($proc);
+
+    $tokens = json_decode($json, true, 32, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+    return is_array($tokens) ? $tokens : [];
 }
