@@ -1,6 +1,6 @@
 <?php
 /**
- * search_recipes_unified.php — R3-safe-final-merge-pythainlp+fallback-v2 (2025-07-04)
+ * search_recipes_unified.php — R3-safe-final-merge-pythainlp+fallback-v4 (2025-07-05)
  *
  * 1) ชื่อเมนูตรง 100 % จะมาก่อนสุด
  * 2) ถ้าไม่ตรงชื่อ → สูตรที่มีวัตถุดิบตรงครบทุกคำค้น
@@ -8,6 +8,8 @@
  * 4) รองรับ include / exclude / allergy / category / sort / pagination
  * 5) ใช้ PyThaiNLP newmm → ถ้า python ใช้ไม่ได้จะ fallback เป็น RegExp
  * 6) Fallback เดาคำวัตถุดิบ (เฉพาะกรณีมี ≤ 1 token) เหมือน v5
+ * 7) ✨ **include / exclude ด้วย “ชื่อวัตถุดิบ”** ผ่านพารามิเตอร์  
+ *        include=กุ้ง,หมูสับ | exclude=กระเทียม,นม
  */
 
 require_once __DIR__ . '/inc/config.php';
@@ -32,9 +34,24 @@ try {
 
     $userId = getLoggedInUserId();
 
-    /* include / exclude */
+    /* include / exclude id */
     $includeIds = array_filter(array_map('intval', (array)($p['include_ids'] ?? [])));
     $excludeIds = array_filter(array_map('intval', (array)($p['exclude_ids'] ?? [])));
+
+    /* ★ NEW: include / exclude by “ชื่อวัตถุดิบ” */
+    $includeNames = [];
+    if (!empty($p['include'])) {
+        $includeNames = array_filter(array_map(static function ($s) {
+            return sanitize(trim($s));
+        }, explode(',', $p['include'])));
+    }
+
+    $excludeNames = [];
+    if (!empty($p['exclude'])) {
+        $excludeNames = array_filter(array_map(static function ($s) {
+            return sanitize(trim($s));
+        }, explode(',', $p['exclude'])));
+    }
 
     /* ─────────────────── 2) TOKENISE ───────────────── */
     $tokens = $rawQ !== '' ? thaiTokens($rawQ) : [];
@@ -84,7 +101,7 @@ try {
                                         OR i.searchable_keywords LIKE ?)))";
             $pieces[] = "CASE WHEN $exists THEN 1 ELSE 0 END";
             $like = "%{$tok}%";
-            $push($params, $like, 8);        // ← 4 placeholder × ถูกใช้ซ้ำ 2 ครั้ง = 8
+            $push($params, $like, 8);        // 4 placeholder × ถูกใช้ซ้ำ 2 ครั้ง = 8
         }
         $cnt       = implode(' + ', $pieces);
         $ingSelect = "$cnt AS ing_match_cnt,
@@ -191,6 +208,23 @@ try {
             $push($params, $id);
         }
     }
+    /* ★ include by “ชื่อ” */
+    if ($includeNames) {
+        $sub = [];
+        foreach ($includeNames as $nm) {
+            $sub[] = 'EXISTS (SELECT 1
+                                FROM recipe_ingredient ri_n
+                                JOIN ingredients i_n USING(ingredient_id)
+                               WHERE ri_n.recipe_id = r.recipe_id
+                                 AND (ri_n.descrip              LIKE ?
+                                      OR i_n.display_name       LIKE ?
+                                      OR i_n.searchable_keywords LIKE ?))';
+            $like = "%{$nm}%";
+            $push($params, $like, 3);   // descrip + display_name + keywords
+        }
+        $sql .= "  AND (" . implode(' AND ', $sub) . ")\n";
+    }
+
     if ($excludeIds) {
         $ph = implode(',', array_fill(0, count($excludeIds), '?'));
         $sql .= "  AND NOT EXISTS (SELECT 1 FROM recipe_ingredient ri_exc
@@ -199,6 +233,22 @@ try {
         foreach ($excludeIds as $id) {
             $push($params, $id);
         }
+    }
+    /* ★ exclude by “ชื่อ” */
+    if ($excludeNames) {
+        $sub = [];
+        foreach ($excludeNames as $nm) {
+            $sub[] = 'NOT EXISTS (SELECT 1
+                                    FROM recipe_ingredient ri_x
+                                    JOIN ingredients i_x USING(ingredient_id)
+                                   WHERE ri_x.recipe_id = r.recipe_id
+                                     AND (ri_x.descrip              LIKE ?
+                                          OR i_x.display_name       LIKE ?
+                                          OR i_x.searchable_keywords LIKE ?))';
+            $like = "%{$nm}%";
+            $push($params, $like, 3);   // descrip + display_name + keywords
+        }
+        $sql .= "  AND (" . implode(' AND ', $sub) . ")\n";
     }
 
     /* ─────────── 7) allergy ─────────── */
