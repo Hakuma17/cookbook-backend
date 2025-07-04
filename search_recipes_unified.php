@@ -1,11 +1,13 @@
 <?php
 /**
- * search_recipes_unified.php — R3-safe-final-fix-v5
+ * search_recipes_unified.php — R3-safe-final-merge-pythainlp+fallback-v2 (2025-07-04)
  *
  * 1) ชื่อเมนูตรง 100 % จะมาก่อนสุด
  * 2) ถ้าไม่ตรงชื่อ → สูตรที่มีวัตถุดิบตรงครบทุกคำค้น
- * 3) มีบางวัตถุดิบ (≥ 1 คำ) จะตามมาถัดไป
- * 4) แยกคำด้วยเว้นวรรค , หรือ ;  รองรับ include / exclude / allergy / category / sort / pagination
+ * 3) มีบางวัตถุดิบ (≥ 1 คำ) จะตามมาถัดไป (ตอนนี้เลือก “ครบทุกคำ”)
+ * 4) รองรับ include / exclude / allergy / category / sort / pagination
+ * 5) ใช้ PyThaiNLP newmm → ถ้า python ใช้ไม่ได้จะ fallback เป็น RegExp
+ * 6) Fallback เดาคำวัตถุดิบ (เฉพาะกรณีมี ≤ 1 token) เหมือน v5
  */
 
 require_once __DIR__ . '/inc/config.php';
@@ -35,9 +37,11 @@ try {
     $excludeIds = array_filter(array_map('intval', (array)($p['exclude_ids'] ?? [])));
 
     /* ─────────────────── 2) TOKENISE ───────────────── */
-    $tokens = $rawQ !== '' ? preg_split('/\s+/u', $rawQ, -1, PREG_SPLIT_NO_EMPTY) : [];
-
-    /* fallback: เดาคำวัตถุดิบ หากค้นแค่คำเดียว */
+    $tokens = $rawQ !== '' ? thaiTokens($rawQ) : [];
+    if (!$tokens && $rawQ !== '') {                        // fallback RegExp
+        $tokens = preg_split('/\s+/u', $rawQ, -1, PREG_SPLIT_NO_EMPTY);
+    }
+    /* ★ fallback เดาคำวัตถุดิบ เพิ่มเติมเหมือน v5 */
     if (count($tokens) <= 1 && $rawQ !== '') {
         $cands = dbAll(
             "SELECT name
@@ -54,11 +58,11 @@ try {
             }
         }
     }
-    $tokens = array_slice($tokens, 0, 5);   // จำกัดไม่เกิน 5 คำ
+    $tokens = array_slice($tokens, 0, 5);                   // จำกัดไม่เกิน 5 คำ
 
     /* helper: เติมค่าเข้าพารามิเตอร์ */
     $params = [];
-    $push   = static function (&$params, $val, $n = 1) {
+    $push   = static function (array &$params, $val, int $n = 1): void {
         for ($i = 0; $i < $n; $i++) {
             $params[] = $val;
         }
@@ -80,7 +84,7 @@ try {
                                         OR i.searchable_keywords LIKE ?)))";
             $pieces[] = "CASE WHEN $exists THEN 1 ELSE 0 END";
             $like = "%{$tok}%";
-            $push($params, $like, 8);   // ★ 4 placeholder × 2 การใช้ $cnt
+            $push($params, $like, 8);        // ← 4 placeholder × ถูกใช้ซ้ำ 2 ครั้ง = 8
         }
         $cnt       = implode(' + ', $pieces);
         $ingSelect = "$cnt AS ing_match_cnt,
@@ -126,7 +130,7 @@ try {
     /* ───────────── 4) SQL + WHERE (พื้นฐาน) ─────────── */
     $sql = "SELECT\n  $recipeFields\nFROM recipe r\nWHERE 1=1\n";
 
-    /* ────── 5) เงื่อนไขชื่อเมนู / วัตถุดิบ (ถ้ามี q) ───── */
+    /* ────── 5) เงื่อนไขชื่อเมนู / วัตถุดิบ ───── */
     if ($rawQ !== '') {
         /* 5.1 ชื่อเมนู */
         $nameConds = [
@@ -144,7 +148,7 @@ try {
         $push($params, "%{$qNoSpace}%");
         $push($params, "%{$rawQ}%");
 
-        /* AND ชื่อเมนูต้องมีทุก token */
+        /* ชื่อเมนูต้องมีทุก token */
         if ($tokens) {
             $sub = [];
             foreach ($tokens as $tok) {
@@ -154,7 +158,7 @@ try {
             $nameConds[] = '(' . implode(' AND ', $sub) . ')';
         }
 
-        /* 5.2 ingredient EXISTS */
+        /* 5.2 ingredient EXISTS (ต้องตรงทุก token) */
         $ingConds = [];
         foreach ($tokens as $tok) {
             $exists = "EXISTS (SELECT 1
@@ -171,20 +175,15 @@ try {
         }
 
         $sql .= "  AND (\n    (" . implode(" OR\n     ", $nameConds) . ")\n";
-        // if ($ingConds) {
-        //     // ≥ 1 คำก็ผ่าน
-        //     $sql .= "    OR (" . implode(' OR ', $ingConds) . ")\n";   // ≥ 1 คำก็ผ่าน
-        // }
-     if ($ingConds) {
-         //ต้องตรงทุก token
-         $sql .= "    OR (" . implode(' AND ', $ingConds) . ")\n";
-     }
+        if ($ingConds) {
+            $sql .= "    OR (" . implode(' AND ', $ingConds) . ")\n";
+        }
         $sql .= "  )\n";
     }
 
     /* ─────────── 6) include / exclude ─────────── */
     if ($includeIds) {
-        $ph   = implode(',', array_fill(0, count($includeIds), '?'));
+        $ph = implode(',', array_fill(0, count($includeIds), '?'));
         $sql .= "  AND EXISTS (SELECT 1 FROM recipe_ingredient ri_inc
                                WHERE ri_inc.recipe_id = r.recipe_id
                                  AND ri_inc.ingredient_id IN ($ph))\n";
@@ -193,7 +192,7 @@ try {
         }
     }
     if ($excludeIds) {
-        $ph   = implode(',', array_fill(0, count($excludeIds), '?'));
+        $ph = implode(',', array_fill(0, count($excludeIds), '?'));
         $sql .= "  AND NOT EXISTS (SELECT 1 FROM recipe_ingredient ri_exc
                                    WHERE ri_exc.recipe_id = r.recipe_id
                                      AND ri_exc.ingredient_id IN ($ph))\n";
@@ -216,7 +215,7 @@ try {
     if ($catId !== null) {
         $sql .= "  AND EXISTS (SELECT 1
                                  FROM category_recipe cr
-                                WHERE cr.recipe_id  = r.recipe_id
+                                WHERE cr.recipe_id = r.recipe_id
                                   AND cr.category_id = ?)\n";
         $push($params, $catId);
     }
@@ -229,11 +228,11 @@ try {
         default       => 'r.created_at DESC',
     };
     $sql .= "ORDER BY
-                name_rank       DESC,
-                $orderBy,
-                ing_rank        DESC,
-                ing_match_cnt   DESC,
-                r.recipe_id     DESC
+               name_rank       DESC,
+               $orderBy,
+               ing_rank        DESC,
+               ing_match_cnt   DESC,
+               r.recipe_id     DESC
              LIMIT $limit OFFSET $offset";
 
     /* ─────────── 10) ASSERT PLACEHOLDER ─────────── */
@@ -266,6 +265,7 @@ try {
     jsonOutput([
         'success' => true,
         'page'    => $page,
+        'tokens'  => $tokens,          // ส่งกลับให้ Flutter ไฮไลท์
         'data'    => $data,
     ]);
 } catch (Throwable $e) {
