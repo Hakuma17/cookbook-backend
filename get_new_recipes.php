@@ -1,6 +1,6 @@
 <?php
 // get_new_recipes.php — ดึง “สูตรมาใหม่” 10 รายการล่าสุด
-// ส่งกลับ field เพิ่ม:  favorite_count  (รวมยอดถูกใจปัจจุบัน)
+// ส่งกลับ field เพิ่ม: favorite_count, has_allergy
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
@@ -24,32 +24,30 @@ try {
                 r.name,
                 r.image_path,
                 r.prep_time,
-                r.favorite_count,                           -- ★ เพิ่ม
-                COALESCE(AVG(rv.rating),0)          AS average_rating,
+                r.favorite_count,                           -- ★ ส่งยอดถูกใจมาด้วย
+                COALESCE(AVG(rv.rating),0) AS average_rating,
                 (SELECT COUNT(*) FROM review rv2
-                  WHERE rv2.recipe_id = r.recipe_id) AS review_count,
-
-                /* วัตถุดิบย่อ (ชื่อ) */
+                   WHERE rv2.recipe_id = r.recipe_id) AS review_count,
                 GROUP_CONCAT(DISTINCT ri.descrip
                              ORDER BY ri.ingredient_id
-                             SEPARATOR ', ')            AS short_ingredients,
-                /* id วัตถุดิบทุกตัว */
+                             SEPARATOR ', ') AS short_ingredients,
                 GROUP_CONCAT(DISTINCT ri.ingredient_id
                              ORDER BY ri.ingredient_id
-                             SEPARATOR ',')             AS ingredient_ids,
+                             SEPARATOR ',') AS ingredient_ids,
 
-                /* มีวัตถุดิบที่ผู้ใช้แพ้หรือไม่ (1/0) */
+                /* ★ เช็ค allergy จากตาราง allergyinfo */
                 " . ($uid ? "EXISTS (
-                        SELECT 1
-                          FROM recipe_ingredient ri2
-                          JOIN allergyinfo a
-                                ON a.ingredient_id = ri2.ingredient_id
-                         WHERE ri2.recipe_id = r.recipe_id
-                           AND a.user_id      = :uid
-                    )" : "0") . "                      AS has_allergy
-        FROM      recipe               r
-        LEFT JOIN review               rv ON rv.recipe_id  = r.recipe_id
-        LEFT JOIN recipe_ingredient    ri ON ri.recipe_id  = r.recipe_id
+                     SELECT 1
+                       FROM recipe_ingredient ri2
+                       JOIN allergyinfo a
+                         ON a.ingredient_id = ri2.ingredient_id
+                      WHERE ri2.recipe_id = r.recipe_id
+                        AND a.user_id      = :uid
+                   )" : "0") . " AS has_allergy
+
+        FROM      recipe            r
+        LEFT JOIN review            rv ON rv.recipe_id  = r.recipe_id
+        LEFT JOIN recipe_ingredient ri ON ri.recipe_id = r.recipe_id
         GROUP BY  r.recipe_id
         ORDER BY  r.created_at DESC
         LIMIT     10
@@ -67,13 +65,13 @@ try {
             'recipe_id'         => (int)$row['recipe_id'],
             'name'              => $row['name'],
             'prep_time'         => $row['prep_time'] ? (int)$row['prep_time'] : null,
-            'favorite_count'    => (int)$row['favorite_count'],   // ★ ใหม่
+            'favorite_count'    => (int)$row['favorite_count'],    // ★
             'average_rating'    => (float)$row['average_rating'],
             'review_count'      => (int)$row['review_count'],
             'short_ingredients' => $row['short_ingredients'] ?? '',
-            'has_allergy'       => (bool)$row['has_allergy'],
-            'image_url'         => $base . '/' .
-                                   ($row['image_path'] ?: 'default_recipe.jpg'),
+            'has_allergy'       => (bool)$row['has_allergy'],      // ★
+            'image_url'         => $base . '/'
+                                   . ($row['image_path'] ?: 'default_recipe.jpg'),
             'ingredient_ids'    => array_filter(
                                       array_map('intval',
                                         explode(',', $row['ingredient_ids'] ?? '')
