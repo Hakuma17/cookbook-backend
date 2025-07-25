@@ -23,10 +23,11 @@ if ($email==='' || $otp==='' || $pass==='') {
 try {
     /* ───────────────────────────────────────────────
      * 3) ตรวจ OTP  (dbOne จะคืน array|false)
+     * 🔄 เปลี่ยนจาก user_otp → user
      * ───────────────────────────────────────────── */
     $row = dbOne(
         "SELECT otp, otp_expires_at
-           FROM user_otp
+           FROM user
           WHERE email = ?
           LIMIT 1", [$email]
     );
@@ -38,12 +39,19 @@ try {
 
     /* ───────────────────────────────────────────────
      * 4) อัปเดตรหัสผ่าน + ลบ OTP (transaction เล็ก ๆ)
+     * 🔄 ลบ OTP โดย update ฟิลด์ใน user แทน DELETE
      * ───────────────────────────────────────────── */
     dbExec("BEGIN");
 
     $hash = password_hash($pass, PASSWORD_ARGON2ID);
-    dbExec("UPDATE user SET password = ? WHERE email = ?", [$hash,$email]);
-    dbExec("DELETE FROM user_otp WHERE email = ?",          [$email]);
+    dbExec("UPDATE user SET 
+                password = ?, 
+                otp = NULL, 
+                otp_expires_at = NULL, 
+                otp_sent_at = NULL, 
+                attempts = 0, 
+                lock_until = NULL 
+            WHERE email = ?", [$hash, $email]);
 
     dbExec("COMMIT");
 

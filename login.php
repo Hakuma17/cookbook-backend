@@ -9,7 +9,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(false, ['message' => 'Method not allowed'], 405);
 }
 
-// ⛑ เพิ่ม trim ป้องกันอีเมลมีช่องว่างเผลอพิมพ์
+//  เพิ่ม trim ป้องกันอีเมลมีช่องว่างเผลอพิมพ์
 $email = trim(sanitize($_POST['email'] ?? ''));
 $pass  = $_POST['password'] ?? '';
 
@@ -20,13 +20,18 @@ if ($email === '' || $pass === '') {
 
 try {
     $row = dbOne(
-        'SELECT user_id, password FROM user WHERE email = ? LIMIT 1',
+        'SELECT user_id, password, is_verified FROM user WHERE email = ? LIMIT 1',
         [$email]
     );
 
     // กรณีไม่พบอีเมล → success=false, HTTP 200
     if (!$row) {
         respond(false, ['message' => 'ไม่พบบัญชีนี้'], 200);
+    }
+
+    //  เช็คยืนยันอีเมลก่อน (หลังจากมีระบบ OTP แล้ว)
+    if ((int)$row['is_verified'] !== 1) {
+        respond(false, ['message' => 'กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ'], 403);
     }
 
     // กรณีรหัสผ่านไม่ตรง → success=false, HTTP 200

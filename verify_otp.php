@@ -24,10 +24,10 @@ if ($email === '' || $otp === '') {
     jsonOutput(['success'=>false,'message'=>'กรุณากรอกอีเมลและ OTP'],400);
 }
 
-/* ดึง record */
+/* 🔄 เปลี่ยนมาใช้ตาราง user แทน user_otp */
 $rec = dbOne(
     "SELECT otp, otp_expires_at, attempts, lock_until
-     FROM user_otp WHERE email=? LIMIT 1",
+     FROM user WHERE email=? LIMIT 1",
     [$email]
 );
 error_log('[verify_otp] dbOne returned: ' . json_encode($rec));
@@ -50,12 +50,12 @@ if ($rec['otp'] !== $otp) {
     error_log("[verify_otp] Invalid OTP attempt {$att}/" . MAX_ATTEMPT);
     if ($att >= MAX_ATTEMPT) {
         $until = date('Y-m-d H:i:s', time() + LOCK_SEC);
-        dbExec("UPDATE user_otp SET attempts=0, lock_until=? WHERE email=?", [$until, $email]);
+        dbExec("UPDATE user SET attempts=0, lock_until=? WHERE email=?", [$until, $email]);
         error_log("[verify_otp] OTP attempts exceeded. Locked until {$until}");
         jsonOutput(['success'=>false,'message'=>'OTP ผิดเกินกำหนด – ล็อก 10 นาที'],429);
     }
 
-    dbExec("UPDATE user_otp SET attempts=? WHERE email=?", [$att, $email]);
+    dbExec("UPDATE user SET attempts=? WHERE email=?", [$att, $email]);
     $left = MAX_ATTEMPT - $att;
     error_log("[verify_otp] OTP incorrect, {$left} attempts left");
     jsonOutput(['success'=>false,'message'=>"OTP ไม่ถูกต้อง (เหลือ {$left} ครั้ง)"],401);
@@ -64,12 +64,19 @@ if ($rec['otp'] !== $otp) {
 /* หมดอายุ */
 if (time() > strtotime($rec['otp_expires_at'])) {
     error_log('[verify_otp] OTP expired at ' . $rec['otp_expires_at']);
-    dbExec("DELETE FROM user_otp WHERE email=?", [$email]);
+    dbExec("UPDATE user SET otp=NULL, otp_expires_at=NULL, otp_sent_at=NULL, attempts=0 WHERE email=?", [$email]);
     jsonOutput(['success'=>false,'message'=>'OTP หมดอายุแล้ว'],410);
 }
 
 /* สำเร็จ – รีเซ็ตรายการ & ตั้ง session */
-dbExec("UPDATE user_otp SET attempts=0, lock_until=NULL WHERE email=?", [$email]);
+$now = date('Y-m-d H:i:s');
+dbExec("
+    UPDATE user 
+    SET otp=NULL, otp_expires_at=NULL, otp_sent_at=NULL, 
+        attempts=0, lock_until=NULL, is_verified=1, verified_at=? 
+    WHERE email=?", 
+    [$now, $email]
+);
 error_log("[verify_otp] OTP verified successfully for email={$email}");
 
 $_SESSION['verified_email'] = $email;
