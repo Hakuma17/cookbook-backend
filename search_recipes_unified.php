@@ -53,11 +53,23 @@ try {
     }
 
     /* ─────────────────── 2) TOKENISE ───────────────── */
+    // ★★★ [CHANGED] รองรับสวิตช์เปิด/ปิดการตัดคำจาก params (ดีฟอลต์ปิด)
+    $tokenize = reqBool('tokenize', defaultSearchTokenize());
+
+    // ★★★ [CHANGED] ใช้ helper ใหม่ parseSearchTerms():
+    // - ถ้าเปิดตัดคำ → พยายามใช้ PyThaiNLP, ถ้า error จะ fallback เป็น split by space/comma
+    // - ถ้าปิด → ใช้ split by space/comma ตามสเปก “กุ้ง กระเทียม / กุ้ง,กระเทียม”
+    $tokens = $rawQ !== '' ? parseSearchTerms($rawQ, $tokenize) : [];
+
+    // ─── [KEPT-AS-COMMENT] บล็อกเดิม: thaiTokens + fallback manual (ปิดการใช้งานเพราะย้ายไป parseSearchTerms)
+    /*
     $tokens = $rawQ !== '' ? thaiTokens($rawQ) : [];
     if (!$tokens && $rawQ !== '') {
         $tokens = preg_split('/\s+/u', $rawQ, -1, PREG_SPLIT_NO_EMPTY);
     }
-    // fallback หา token เพิ่ม (เดิม v5)
+    */
+
+    // fallback เดาคำวัตถุดิบ (เดิม v5) — ยังใช้ได้ร่วมกับระบบใหม่
     if (count($tokens) <= 1 && $rawQ !== '') {
         $cands = dbAll(
             "SELECT name
@@ -90,20 +102,21 @@ try {
     if ($tokens) {
         $cases = [];
         foreach ($tokens as $tok) {
+            // ★★★ [CHANGED] ใช้ likePattern() + ESCAPE '\\' เพื่อความถูกต้องของ %/_
             $exists = "(EXISTS (
                 SELECT 1
                   FROM recipe_ingredient ri
                   JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
                  WHERE ri.recipe_id = r.recipe_id
                    AND (
-                       ri.descrip LIKE ?
-                    OR i.name LIKE ?
-                    OR i.display_name LIKE ?
-                    OR i.searchable_keywords LIKE ?
+                       ri.descrip LIKE ? ESCAPE '\\\\'
+                    OR i.name LIKE ? ESCAPE '\\\\'
+                    OR i.display_name LIKE ? ESCAPE '\\\\'
+                    OR i.searchable_keywords LIKE ? ESCAPE '\\\\'
                    )
             ))";
             $cases[] = "CASE WHEN $exists THEN 1 ELSE 0 END";
-            $like = "%{$tok}%";
+            $like = likePattern($tok);
             // แต่ละ token ต้องเติม 4 placeholders × 2 (ใน CASE + ใน COUNT) = 8
             $push($params, $like, 8);
         }
@@ -171,6 +184,7 @@ try {
     $push($params, $userId);     // for has_allergy
     $push($params, $rawQ);       // name_rank = ?
     $push($params, $qNoSpace);   // name_rank without spaces
+    // ★★★ [CHANGED] ใช้ likePattern + ESCAPE ใน WHERE จริง แต่ section name_rank ตรงนี้ยังเป็น pattern เดิม (prefix/contains)
     $push($params, "{$rawQ}%");  
     $push($params, "%{$qNoSpace}%");
     $push($params, "%{$qNoSpace}%");
@@ -181,15 +195,16 @@ try {
     /* ───────── 5) เงื่อนไขชื่อเมนู / วัตถุดิบ ───────── */
     if ($rawQ !== '') {
         // 5.1 name conditions
+        // ★★★ [CHANGED] ใส่ ESCAPE '\\' ให้ทุก LIKE จริงใน WHERE
         $nameConds = [
             'r.name = ?',
             "REPLACE(REPLACE(REPLACE(r.name,CHAR(13),''),CHAR(10),''),' ','') = ?",
-            'r.name LIKE ?',
-            'r.name LIKE ?',
-            "REPLACE(r.name,' ','') LIKE ?",
-            'r.name LIKE ?',
+            'r.name LIKE ? ESCAPE \'\\\\\'',
+            'r.name LIKE ? ESCAPE \'\\\\\'',
+            "REPLACE(r.name,' ','') LIKE ? ESCAPE '\\\\'",
+            'r.name LIKE ? ESCAPE \'\\\\\'',
         ];
-        // เติมอีก 6 param ให้ตรงกับเงื่อนไข
+        // เติมอีก 6 param ให้ตรงกับเงื่อนไข (ใช้ค่าจากด้านบนที่เตรียม prefix/contains ไว้แล้ว)
         $push($params, $rawQ);
         $push($params, $qNoSpace);
         $push($params, "{$rawQ}%");
@@ -201,8 +216,8 @@ try {
         if ($tokens) {
             $sub = [];
             foreach ($tokens as $tok) {
-                $sub[] = 'r.name LIKE ?';
-                $push($params, "%{$tok}%");
+                $sub[] = 'r.name LIKE ? ESCAPE \'\\\\\'';
+                $push($params, likePattern($tok));
             }
             $nameConds[] = '(' . implode(' AND ', $sub) . ')';
         }
@@ -216,14 +231,15 @@ try {
                 JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
                WHERE ri.recipe_id = r.recipe_id
                  AND (
-                     ri.descrip LIKE ?
-                  OR i.name LIKE ?
-                  OR i.display_name LIKE ?
-                  OR i.searchable_keywords LIKE ?
+                     ri.descrip LIKE ? ESCAPE '\\\\'
+                  OR i.name LIKE ? ESCAPE '\\\\'
+                  OR i.display_name LIKE ? ESCAPE '\\\\'
+                  OR i.searchable_keywords LIKE ? ESCAPE '\\\\'
                  )
             )";
             $ingConds[] = $exists;
-            $push($params, "%{$tok}%", 4);
+            $like = likePattern($tok);
+            $push($params, $like, 4);
         }
 
         $sql .= "  AND (\n"
@@ -255,12 +271,14 @@ try {
                 JOIN ingredients i_n USING(ingredient_id)
                WHERE ri_n.recipe_id = r.recipe_id
                  AND (
-                     ri_n.descrip LIKE ?
-                  OR i_n.display_name LIKE ?
-                  OR i_n.searchable_keywords LIKE ?
+                     ri_n.descrip LIKE ? ESCAPE \'\\\\\'
+                  OR i_n.name LIKE ? ESCAPE \'\\\\\'
+                  OR i_n.display_name LIKE ? ESCAPE \'\\\\\'
+                  OR i_n.searchable_keywords LIKE ? ESCAPE \'\\\\\'
                  )
             )';
-            $push($params, "%{$nm}%", 3);
+            $like = likePattern($nm);
+            $push($params, $like, 4);
         }
         $sql .= "  AND (" . implode(' AND ', $subs) . ")\n";
     }
@@ -285,12 +303,14 @@ try {
                 JOIN ingredients i_x USING(ingredient_id)
                WHERE ri_x.recipe_id = r.recipe_id
                  AND (
-                     ri_x.descrip LIKE ?
-                  OR i_x.display_name LIKE ?
-                  OR i_x.searchable_keywords LIKE ?
+                     ri_x.descrip LIKE ? ESCAPE \'\\\\\'
+                  OR i_x.name LIKE ? ESCAPE \'\\\\\'
+                  OR i_x.display_name LIKE ? ESCAPE \'\\\\\'
+                  OR i_x.searchable_keywords LIKE ? ESCAPE \'\\\\\'
                  )
             )';
-            $push($params, "%{$nm}%", 3);
+            $like = likePattern($nm);
+            $push($params, $like, 4);
         }
         $sql .= "  AND (" . implode(' AND ', $subs) . ")\n";
     }

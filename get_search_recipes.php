@@ -8,14 +8,14 @@ require_once __DIR__ . '/inc/db.php';
 header('Content-Type: application/json; charset=UTF-8');
 
 try {
-    $p       = ($_SERVER['REQUEST_METHOD'] === 'POST') ? $_POST : $_GET;
-    $q       = sanitize($p['q'] ?? '');
-    $qNoSpc  = preg_replace('/\s+/u', '', $q);
-    $sort    = strtolower(trim($p['sort'] ?? 'latest'));
-    $catId   = isset($p['cat_id']) && $p['cat_id'] !== '' ? (int)$p['cat_id'] : null;
-    $page    = max(1, (int)($p['page']  ?? 1));
-    $limit   = max(1, min(50, (int)($p['limit'] ?? 26)));
-    $offset  = ($page - 1) * $limit;
+    $p        = ($_SERVER['REQUEST_METHOD'] === 'POST') ? $_POST : $_GET;
+    $q        = sanitize($p['q'] ?? '');
+    $qNoSpc   = preg_replace('/\s+/u', '', $q);
+    $sort     = strtolower(trim($p['sort'] ?? 'latest'));
+    $catId    = isset($p['cat_id']) && $p['cat_id'] !== '' ? (int)$p['cat_id'] : null;
+    $page     = max(1, (int)($p['page']  ?? 1));
+    $limit    = max(1, min(50, (int)($p['limit'] ?? 26)));
+    $offset   = ($page - 1) * $limit;
 
     $incRaw     = $p['include_ids'] ?? [];
     $excRaw     = $p['exclude_ids'] ?? [];
@@ -36,6 +36,7 @@ try {
 
     $userId = getLoggedInUserId();
 
+    // SELECT clause หลักสำหรับใช้ทั้งใน query ปกติและ fallback
     $select = "
       SELECT DISTINCT
         r.recipe_id AS recipe_id,
@@ -47,11 +48,11 @@ try {
         (SELECT COUNT(*) FROM favorites f WHERE f.recipe_id = r.recipe_id) AS favorite_count,
         (SELECT COUNT(*) FROM review    v WHERE v.recipe_id = r.recipe_id) AS review_count,
         (SELECT GROUP_CONCAT(DISTINCT
-                 CASE
-                   WHEN ri.descrip IS NOT NULL AND ri.descrip <> '' THEN ri.descrip
-                   ELSE i.display_name
-                 END
-                 SEPARATOR ', ')
+                CASE
+                  WHEN ri.descrip IS NOT NULL AND ri.descrip <> '' THEN ri.descrip
+                  ELSE i.display_name
+                END
+                SEPARATOR ', ')
            FROM recipe_ingredient ri
            JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
           WHERE ri.recipe_id = r.recipe_id) AS short_ingredients,
@@ -64,10 +65,10 @@ try {
     if ($qLen) {
         $selectNameRank = ",
         (CASE
-           WHEN r.name = :q_exact                          THEN 3
-           WHEN REPLACE(r.name,' ','') = :q_exact_nospace  THEN 2
-           WHEN r.name LIKE :q_prefix                      THEN 1
-           ELSE 0
+          WHEN r.name = :q_exact                   THEN 3
+          WHEN REPLACE(r.name,' ','') = :q_exact_nospace   THEN 2
+          WHEN r.name LIKE :q_prefix               THEN 1
+          ELSE 0
          END) AS name_rank";
         $paramsNameRank = [
             ':q_exact'         => $q,
@@ -86,15 +87,15 @@ try {
             $aliasIng = 'ing' . $i;
             $sql .= "
               INNER JOIN recipe_ingredient AS $aliasRI
-                     ON $aliasRI.recipe_id = r.recipe_id
+                         ON $aliasRI.recipe_id = r.recipe_id
               INNER JOIN ingredients AS $aliasIng
-                     ON $aliasIng.ingredient_id = $aliasRI.ingredient_id
-                    AND (
-                          $aliasRI.descrip               LIKE ?
-                       OR $aliasIng.name                LIKE ?
-                       OR $aliasIng.display_name        LIKE ?
-                       OR $aliasIng.searchable_keywords LIKE ?
-                    )";
+                         ON $aliasIng.ingredient_id = $aliasRI.ingredient_id
+                        AND (
+                              $aliasRI.descrip           LIKE ?
+                           OR $aliasIng.name              LIKE ?
+                           OR $aliasIng.display_name      LIKE ?
+                           OR $aliasIng.searchable_keywords LIKE ?
+                        )";
             $like = '%' . $t . '%';
             array_push($params, $like, $like, $like, $like);
         }
@@ -104,15 +105,15 @@ try {
         $marks = implode(',', array_fill(0, count($includeIds), '?'));
         $sql .= "
           INNER JOIN recipe_ingredient inc
-                  ON inc.recipe_id = r.recipe_id
-                 AND inc.ingredient_id IN ($marks)";
+                     ON inc.recipe_id = r.recipe_id
+                    AND inc.ingredient_id IN ($marks)";
         $params = array_merge($params, $includeIds);
     }
 
     $sql .= $excludeIds
         ? " WHERE r.recipe_id NOT IN (
-               SELECT recipe_id FROM recipe_ingredient WHERE ingredient_id IN (" . implode(',', array_fill(0, count($excludeIds), '?')) . ")
-           )"
+              SELECT recipe_id FROM recipe_ingredient WHERE ingredient_id IN (" . implode(',', array_fill(0, count($excludeIds), '?')) . ")
+            )"
         : ' WHERE 1';
     $params = array_merge($params, $excludeIds);
 
@@ -160,15 +161,15 @@ try {
             'id'                => (int)$r['id'],
             'name'              => $r['name'],
             'image_url'         => $r['image_path']
-                                      ? $base . '/' . basename($r['image_path'])
-                                      : $base . '/default_recipe.png',
+                                       ? $base . '/' . basename($r['image_path'])
+                                       : $base . '/default_recipe.png',
             'favorite_count'    => (int)$r['favorite_count'],
             'average_rating'    => (float)$r['average_rating'],
             'review_count'      => (int)$r['review_count'],
             'prep_time'         => $r['prep_time'] !== null ? (int)$r['prep_time'] : null,
             'short_ingredients' => $r['short_ingredients'],
             'ingredient_ids'    => array_filter(array_map('intval',
-                                           explode(',', $r['ingredient_ids'] ?? ''))),
+                                       explode(',', $r['ingredient_ids'] ?? ''))),
         ];
     };
     $data = array_map($mapRow, $rows);
@@ -180,8 +181,9 @@ try {
         if ($qWords) {
             $likeConds = implode(' AND ', array_fill(0, count($qWords), 'r.name LIKE ?'));
             $paramsFb = array_map(fn($w) => '%' . $w . '%', $qWords);
+            // [FIXED] ใช้ $select เพื่อให้ได้ column ครบเหมือน query หลัก
             $sqlFb = "
-              SELECT DISTINCT r.*
+              {$select}
                 FROM recipe r
                WHERE {$likeConds}
                ORDER BY r.created_at DESC
@@ -193,18 +195,21 @@ try {
 
     // ===== Fallback 2: ถ้ายังว่างอีก → หาในวัตถุดิบ
     if (empty($data) && $qLen > 0) {
+        // [FIXED] แก้ไขเงื่อนไข LIKE ให้ถูกต้อง
         $stmtFb = pdo()->prepare("
             SELECT ingredient_id
               FROM ingredients
-             WHERE :qNos LIKE CONCAT('%', REPLACE(name,' ',''), '%')
-                OR :qNos LIKE CONCAT('%', REPLACE(display_name,' ',''), '%')
+             WHERE REPLACE(name,' ','') LIKE :qPattern
+                OR REPLACE(display_name,' ','') LIKE :qPattern
         ");
-        $stmtFb->execute([':qNos' => $qNoSpc]);
+        $stmtFb->execute([':qPattern' => '%' . $qNoSpc . '%']);
         $ingFbIds = array_map('intval', $stmtFb->fetchAll(PDO::FETCH_COLUMN));
+        
         if ($ingFbIds) {
             $marksFb   = implode(',', array_fill(0, count($ingFbIds), '?'));
+            // [FIXED] ใช้ $select เพื่อให้ได้ column ครบเหมือน query หลัก
             $sqlFb     = "
-              SELECT DISTINCT r.*
+              {$select}
                 FROM recipe r
                 JOIN recipe_ingredient ri ON ri.recipe_id = r.recipe_id
                WHERE ri.ingredient_id IN ($marksFb)
@@ -223,6 +228,6 @@ try {
     ]);
 
 } catch (Throwable $e) {
-    error_log('[get_search_recipes] ' . $e->getMessage());
+    error_log('[search_recipes] ' . $e->getMessage());
     jsonError('Server Error', 500);
 }

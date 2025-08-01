@@ -13,6 +13,6 @@ define('GOOGLE_CLIENT_ID',
 );
 
 // — เปิด error log ช่วง dev —
-ini_set('display_errors', 1);
+ini_set('display_errors', 0);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);

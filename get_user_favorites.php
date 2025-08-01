@@ -1,72 +1,97 @@
 <?php
-// get_user_favorites.php — คืนรายการสูตรโปรดของผู้ใช้
+// get_user_favorites.php — คืนรายการสูตรโปรดของผู้ใช้ (รองรับ only_ids=1)
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
-require_once __DIR__ . '/inc/db.php'; // ← ใช้ helper PDO
+require_once __DIR__ . '/inc/db.php'; // ← helper PDO (dbAll, dbVal, ...)
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
 }
 
 try {
-    /* ────────────────────────────────────────────────
-     * 1) ตรวจสอบ session → ต้องล็อกอิน
-     * ──────────────────────────────────────────────── */
-    $uid  = requireLogin();
-    $base = getBaseUrl() . '/uploads/recipes';
+    /* 1) ต้องล็อกอิน */
+    $uid = requireLogin();
 
-    /* ────────────────────────────────────────────────
-     * 2) ดึงรายการสูตรอาหารที่ผู้ใช้กด Favorite ไว้
-     * ──────────────────────────────────────────────── */
+    /* 2) โหมดเบา: ?only_ids=1 → ส่งกลับอาร์เรย์ id ล้วน */
+    $onlyIds = (isset($_GET['only_ids']) && $_GET['only_ids'] === '1');
+    if ($onlyIds) {
+        // ใช้คอลัมน์เดียวให้เบาที่สุด
+        $rows = dbAll("SELECT recipe_id AS id FROM favorites WHERE user_id = ?", [$uid]);
+        $ids  = [];
+        if (is_array($rows)) {
+            // map เป็น int ปลอดภัย
+            foreach ($rows as $r) {
+                $v = isset($r['id']) ? (int)$r['id'] : null;
+                if ($v && $v > 0) $ids[] = $v;
+            }
+        }
+        jsonOutput(['success' => true, 'data' => $ids]);
+        exit;
+    }
+
+    /* 3) โหมดเต็ม: คืนรายละเอียดเมนูโปรด */
+    $baseUploads = rtrim(getBaseUrl(), '/').'/uploads/recipes';
+
+    // ดึงข้อมูลหลัก + นับรีวิว/หัวใจปัจจุบัน
     $rows = dbAll("
-        SELECT r.recipe_id,
-               r.name,
-               r.image_path,
-               r.prep_time,
-               r.average_rating,
-               (
-                   SELECT COUNT(*)
-                   FROM review
-                   WHERE recipe_id = r.recipe_id
-               ) AS review_count
-        FROM favorites  AS f
-        JOIN recipe     AS r ON r.recipe_id = f.recipe_id
+        SELECT
+            r.recipe_id,
+            r.name,
+            r.image_path,
+            r.prep_time,
+            r.average_rating,
+            -- นับจำนวนรีวิว
+            (SELECT COUNT(*) FROM review  c WHERE c.recipe_id = r.recipe_id) AS review_count,
+            -- นับจำนวนคนกดถูกใจทั้งหมดของเมนูนี้
+            (SELECT COUNT(*) FROM favorites f2 WHERE f2.recipe_id = r.recipe_id) AS favorite_count
+        FROM favorites  f
+        JOIN recipe     r ON r.recipe_id = f.recipe_id
         WHERE f.user_id = ?
+        ORDER BY r.name ASC
     ", [$uid]);
 
-    /* ────────────────────────────────────────────────
-     * 3) ตรวจสอบว่าแต่ละสูตรมีวัตถุดิบที่แพ้หรือไม่
-     * ──────────────────────────────────────────────── */
     $data = [];
-
     foreach ($rows as $r) {
+        // ตรวจแพ้สำหรับผู้ใช้ปัจจุบัน
         $hasAllergy = dbVal("
             SELECT COUNT(*)
-            FROM recipe_ingredient
-            WHERE recipe_id = ?
-              AND ingredient_id IN (
-                  SELECT ingredient_id FROM allergyinfo WHERE user_id = ?
+            FROM recipe_ingredient ri
+            WHERE ri.recipe_id = ?
+              AND ri.ingredient_id IN (
+                    SELECT ingredient_id FROM allergyinfo WHERE user_id = ?
               )
         ", [$r['recipe_id'], $uid]) > 0;
 
-        $data[] = [
-            'recipe_id'      => (int) $r['recipe_id'],
-            'name'           => $r['name'],
-            'prep_time'      => $r['prep_time'] !== null ? (int) $r['prep_time'] : null,
-            'average_rating' => (float) $r['average_rating'],
-            'review_count'   => (int) $r['review_count'],
-            'image_url'      => $base . '/' . basename($r['image_path'] ?: 'default_recipe.png'),
-            'has_allergy'    => $hasAllergy,
+        // สร้าง URL รูป (fallback ถ้าไม่มี)
+        $img = !empty($r['image_path'])
+            ? ($baseUploads.'/'.basename($r['image_path']))
+            : ($baseUploads.'/default_recipe.png');
+
+        $avgRating = isset($r['average_rating']) ? round((float)$r['average_rating'], 1) : 0.0;
+        $reviewCnt = isset($r['review_count'])   ? (int)$r['review_count']   : 0;
+        $favCnt    = isset($r['favorite_count']) ? (int)$r['favorite_count'] : 0;
+
+        // คืนทั้ง id และ recipe_id เพื่อความเข้ากันได้กับแอปหลายเวอร์ชัน
+        $item = [
+            'id'              => (int)$r['recipe_id'],
+            'recipe_id'       => (int)$r['recipe_id'],
+            'name'            => (string)$r['name'],
+            'prep_time'       => ($r['prep_time'] !== null ? (int)$r['prep_time'] : null),
+            'average_rating'  => $avgRating,
+            'review_count'    => $reviewCnt,
+            'favorite_count'  => $favCnt,
+            'is_favorited'    => true,              // เพราะเป็นเมนูโปรดของผู้ใช้รายนี้
+            'image_url'       => $img,
+            'has_allergy'     => $hasAllergy,
         ];
+
+        $data[] = $item;
     }
 
-    /* ────────────────────────────────────────────────
-     * 4) ส่งข้อมูลกลับ
-     * ──────────────────────────────────────────────── */
     jsonOutput(['success' => true, 'data' => $data]);
 
 } catch (Throwable $e) {
-    error_log('[get_user_favorites] ' . $e->getMessage());
+    error_log('[get_user_favorites] '.$e->getMessage());
     jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }
