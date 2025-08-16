@@ -1,4 +1,11 @@
 <?php
+/**
+ * search_recipes.php — unified + groups + allergy-flag (POS-ONLY placeholders)
+ * - ✅ ใช้ placeholder แบบเดียวทั้งหมดเป็น "?" (PDO ห้ามผสม named + positional)
+ * - ✅ ใส่ ESCAPE '\\' กับ LIKE ทุกจุด + sanitize wildcard ด้วย likePatternParam()
+ * - ✅ เพิ่มตัวกรองกลุ่ม (group/include_groups/exclude_groups) และธง has_allergy (แบบ “กลุ่ม”)
+ * - คอมเมนต์เดิมคงไว้ และทำเครื่องหมาย ★★★ NEW ในส่วนที่เพิ่ม
+ */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
@@ -6,6 +13,15 @@ require_once __DIR__ . '/inc/json.php';
 require_once __DIR__ . '/inc/db.php';
 
 header('Content-Type: application/json; charset=UTF-8');
+
+/* ─── Helpers เฉพาะไฟล์นี้ (ไม่กระทบของเดิม) ───────────────────────────── */
+if (!function_exists('likePatternParam')) {
+    // ทำ pattern สำหรับ LIKE โดย escape \ % _
+    function likePatternParam(string $s): string {
+        $s = str_replace(['\\','%','_'], ['\\\\','\\%','\\_'], $s);
+        return '%' . $s . '%';
+    }
+}
 
 try {
     $p        = ($_SERVER['REQUEST_METHOD'] === 'POST') ? $_POST : $_GET;
@@ -30,13 +46,33 @@ try {
         $tokens = array_map('trim', $tokens);
     }
 
+    /* ★★★ NEW: ตัวกรอง “กลุ่มวัตถุดิบ” (newcatagory) */
+    $group = isset($p['group']) ? trim((string)$p['group']) : '';
+
+    $includeGroups = [];
+    if (!empty($p['include_groups'])) {
+        $includeGroups = is_array($p['include_groups'])
+            ? array_values(array_filter(array_map('trim', $p['include_groups'])))
+            : array_values(array_filter(array_map('trim', explode(',', (string)$p['include_groups']))));
+    }
+
+    $excludeGroups = [];
+    if (!empty($p['exclude_groups'])) {
+        $excludeGroups = is_array($p['exclude_groups'])
+            ? array_values(array_filter(array_map('trim', $p['exclude_groups'])))
+            : array_values(array_filter(array_map('trim', explode(',', (string)$p['exclude_groups']))));
+    }
+
     $qLen = mb_strlen($q);
     if ($qLen > 100)              jsonError('คำค้นหายาวเกินไป', 400);
     if ($qLen > 0 && $qLen < 2)   jsonError('กรุณาใส่คำค้นอย่างน้อย 2 ตัวอักษร', 400);
 
     $userId = getLoggedInUserId();
 
-    // SELECT clause หลักสำหรับใช้ทั้งใน query ปกติและ fallback
+    /* ───────────────────────── SELECT หลัก ─────────────────────────
+     * ★★★ [NEW] ใส่ฟิลด์ has_allergy (คำนวณแบบ “กลุ่ม”) ใน SELECT
+     * ✅ ใช้ placeholder "?" เท่านั้น (positional) เพื่อเลี่ยง PDO HY093
+     */
     $select = "
       SELECT DISTINCT
         r.recipe_id AS recipe_id,
@@ -60,26 +96,48 @@ try {
            FROM recipe_ingredient ri
           WHERE ri.recipe_id = r.recipe_id) AS ingredient_ids";
 
-    $selectNameRank  = '';
-    $paramsNameRank  = [];
+    $paramsSelect = [];
+
+    if ($userId) {
+        $select .= ",
+        /* [NEW] has_allergy: เทียบ newcatagory ระหว่างส่วนผสมกับสิ่งที่ผู้ใช้แพ้ */
+        EXISTS (
+          SELECT 1
+            FROM recipe_ingredient ri_all
+            JOIN ingredients i_all ON i_all.ingredient_id = ri_all.ingredient_id
+           WHERE ri_all.recipe_id = r.recipe_id
+             AND EXISTS (
+               SELECT 1
+                 FROM allergyinfo a
+                 JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+                WHERE a.user_id = ?
+                  AND ia.newcatagory = i_all.newcatagory
+             )
+        ) AS has_allergy";
+        $paramsSelect[] = $userId;  // ตำแหน่งตรงกับ ? ใน SELECT ข้างบน
+    } else {
+        $select .= ",
+        0 AS has_allergy";
+    }
+
+    // ★ name_rank (เพิ่มเมื่อมีคำค้น)
+    $selectNameRank = '';
+    $paramsNameRank = [];
     if ($qLen) {
         $selectNameRank = ",
         (CASE
-          WHEN r.name = :q_exact                   THEN 3
-          WHEN REPLACE(r.name,' ','') = :q_exact_nospace   THEN 2
-          WHEN r.name LIKE :q_prefix               THEN 1
+          WHEN r.name = ?                                THEN 3
+          WHEN REPLACE(r.name,' ','') = ?                THEN 2
+          WHEN r.name LIKE ? ESCAPE '\\\\'               THEN 1
           ELSE 0
          END) AS name_rank";
-        $paramsNameRank = [
-            ':q_exact'         => $q,
-            ':q_exact_nospace' => $qNoSpc,
-            ':q_prefix'        => $q . '%',
-        ];
+        $paramsNameRank = [$q, $qNoSpc, likePatternParam($q)];
     }
 
     $sql    = $select . $selectNameRank . "\nFROM recipe r";
-    $params = [];
+    $paramsWhere = [];
 
+    /* ───────────────────────── JOINs จาก tokens ───────────────────────── */
     if ($tokens) {
         $i = 0;
         foreach ($tokens as $t) {
@@ -91,23 +149,24 @@ try {
               INNER JOIN ingredients AS $aliasIng
                          ON $aliasIng.ingredient_id = $aliasRI.ingredient_id
                         AND (
-                              $aliasRI.descrip           LIKE ?
-                           OR $aliasIng.name              LIKE ?
-                           OR $aliasIng.display_name      LIKE ?
-                           OR $aliasIng.searchable_keywords LIKE ?
+                              $aliasRI.descrip              LIKE ? ESCAPE '\\\\'
+                           OR $aliasIng.name                LIKE ? ESCAPE '\\\\'
+                           OR $aliasIng.display_name        LIKE ? ESCAPE '\\\\'
+                           OR $aliasIng.searchable_keywords LIKE ? ESCAPE '\\\\'
                         )";
-            $like = '%' . $t . '%';
-            array_push($params, $like, $like, $like, $like);
+            $like = likePatternParam($t);
+            array_push($paramsWhere, $like, $like, $like, $like);
         }
     }
 
+    /* ───────────────────────── include/exclude IDs ───────────────────────── */
     if ($includeIds) {
         $marks = implode(',', array_fill(0, count($includeIds), '?'));
         $sql .= "
           INNER JOIN recipe_ingredient inc
                      ON inc.recipe_id = r.recipe_id
                     AND inc.ingredient_id IN ($marks)";
-        $params = array_merge($params, $includeIds);
+        $paramsWhere = array_merge($paramsWhere, $includeIds);
     }
 
     $sql .= $excludeIds
@@ -115,19 +174,27 @@ try {
               SELECT recipe_id FROM recipe_ingredient WHERE ingredient_id IN (" . implode(',', array_fill(0, count($excludeIds), '?')) . ")
             )"
         : ' WHERE 1';
-    $params = array_merge($params, $excludeIds);
+    $paramsWhere = array_merge($paramsWhere, $excludeIds);
 
+    /* ───────────────────────── กรองชื่อสูตรตามคำค้น ───────────────────────── */
     if ($qLen) {
         $sql .= "
           AND (
                 r.name = ?
              OR REPLACE(r.name,' ','') = ?
-             OR r.name LIKE ?
-             OR REPLACE(r.name,' ','') LIKE ?
+             OR r.name LIKE ? ESCAPE '\\\\'
+             OR REPLACE(r.name,' ','') LIKE ? ESCAPE '\\\\'
           )";
-        array_push($params, $q, $qNoSpc, "%{$q}%", "%{$qNoSpc}%");
+        array_push(
+            $paramsWhere,
+            $q,
+            $qNoSpc,
+            likePatternParam($q),
+            likePatternParam($qNoSpc)
+        );
     }
 
+    /* ───────────────────────── หมวดหมู่ ───────────────────────── */
     if ($catId !== null) {
         $sql .= "
           AND EXISTS (
@@ -136,9 +203,47 @@ try {
              WHERE cr.recipe_id = r.recipe_id
                AND cr.category_id = ?
           )";
-        $params[] = $catId;
+        $paramsWhere[] = $catId;
     }
 
+    /* ───────────────────────── ★★★ NEW: ตัวกรองกลุ่ม ───────────────────────── */
+    if ($group !== '') {
+        $sql .= "
+          AND EXISTS (
+            SELECT 1
+              FROM recipe_ingredient ri_g
+              JOIN ingredients i_g ON i_g.ingredient_id = ri_g.ingredient_id
+             WHERE ri_g.recipe_id = r.recipe_id
+               AND TRIM(i_g.newcatagory) = TRIM(?)
+          )";
+        $paramsWhere[] = $group;
+    }
+
+    foreach ($includeGroups as $g) {
+        $sql .= "
+          AND EXISTS (
+            SELECT 1
+              FROM recipe_ingredient ri_gi
+              JOIN ingredients i_gi ON i_gi.ingredient_id = ri_gi.ingredient_id
+             WHERE ri_gi.recipe_id = r.recipe_id
+               AND TRIM(i_gi.newcatagory) = TRIM(?)
+          )";
+        $paramsWhere[] = $g;
+    }
+
+    foreach ($excludeGroups as $g) {
+        $sql .= "
+          AND NOT EXISTS (
+            SELECT 1
+              FROM recipe_ingredient ri_ge
+              JOIN ingredients i_ge ON i_ge.ingredient_id = ri_ge.ingredient_id
+             WHERE ri_ge.recipe_id = r.recipe_id
+               AND TRIM(i_ge.newcatagory) = TRIM(?)
+          )";
+        $paramsWhere[] = $g;
+    }
+
+    /* ───────────────────────── ORDER + PAGING ───────────────────────── */
     $orderTrail   = match ($sort) {
         'popular'     => 'favorite_count DESC',
         'trending'    => 'r.created_at DESC, favorite_count DESC',
@@ -149,10 +254,12 @@ try {
 
     $sql .= "
       ORDER BY {$orderNameRank} {$orderTrail}
-      LIMIT {$limit} OFFSET {$offset}";
+      LIMIT ? OFFSET ?";
 
-    $params = array_merge($paramsNameRank, $params);
-    $rows   = dbAll($sql, $params);
+    $paramsFinal = array_merge($paramsSelect, $paramsNameRank, $paramsWhere, [$limit, $offset]);
+
+    /* ───────────────────────── Execute ───────────────────────── */
+    $rows   = dbAll($sql, $paramsFinal);
 
     $base   = getBaseUrl() . '/uploads/recipes';
     $mapRow = function($r) use ($base) {
@@ -170,44 +277,50 @@ try {
             'short_ingredients' => $r['short_ingredients'],
             'ingredient_ids'    => array_filter(array_map('intval',
                                        explode(',', $r['ingredient_ids'] ?? ''))),
+            // ★★★ [NEW] ติดธงแพ้อาหารแบบ “กลุ่ม”
+            'has_allergy'       => !empty($r['has_allergy']),
         ];
     };
     $data = array_map($mapRow, $rows);
 
-    // ===== Fallback 1: แยกคำค้นหาแล้วลองหาในชื่อสูตร
+    /* ───────────────────────── Fallback 1: หาในชื่อสูตร ─────────────────────────
+     * - คง logic เดิม แต่ใช้ $select (ที่มี has_allergy) และ placeholder "?" ทั้งหมด
+     */
     if (empty($data) && $qLen > 0) {
         $qWords = preg_split('/\s+/u', $q, -1, PREG_SPLIT_NO_EMPTY);
         $qWords = array_filter($qWords, fn($s) => mb_strlen($s) >= 2);
         if ($qWords) {
-            $likeConds = implode(' AND ', array_fill(0, count($qWords), 'r.name LIKE ?'));
-            $paramsFb = array_map(fn($w) => '%' . $w . '%', $qWords);
-            // [FIXED] ใช้ $select เพื่อให้ได้ column ครบเหมือน query หลัก
+            $likeConds = implode(' AND ', array_fill(0, count($qWords), 'r.name LIKE ? ESCAPE \'\\\\\''));
+            $paramsFb = array_map('likePatternParam', $qWords);
+
             $sqlFb = "
               {$select}
                 FROM recipe r
                WHERE {$likeConds}
                ORDER BY r.created_at DESC
-               LIMIT {$limit} OFFSET {$offset}";
-            $rowsFb = dbAll($sqlFb, $paramsFb);
-            $data = array_map($mapRow, $rowsFb);
+               LIMIT ? OFFSET ?";
+
+            $paramsFbFinal = array_merge($paramsSelect, $paramsFb, [$limit, $offset]);
+
+            $rowsFb = dbAll($sqlFb, $paramsFbFinal);
+            $data   = array_map($mapRow, $rowsFb);
         }
     }
 
-    // ===== Fallback 2: ถ้ายังว่างอีก → หาในวัตถุดิบ
+    /* ───────────────────────── Fallback 2: หาในวัตถุดิบ ───────────────────────── */
     if (empty($data) && $qLen > 0) {
-        // [FIXED] แก้ไขเงื่อนไข LIKE ให้ถูกต้อง
         $stmtFb = pdo()->prepare("
             SELECT ingredient_id
               FROM ingredients
-             WHERE REPLACE(name,' ','') LIKE :qPattern
-                OR REPLACE(display_name,' ','') LIKE :qPattern
+             WHERE REPLACE(name,' ','')         LIKE ? ESCAPE '\\\\'
+                OR REPLACE(display_name,' ','') LIKE ? ESCAPE '\\\\'
         ");
-        $stmtFb->execute([':qPattern' => '%' . $qNoSpc . '%']);
+        $qPat = likePatternParam($qNoSpc);
+        $stmtFb->execute([$qPat, $qPat]);
         $ingFbIds = array_map('intval', $stmtFb->fetchAll(PDO::FETCH_COLUMN));
-        
+
         if ($ingFbIds) {
             $marksFb   = implode(',', array_fill(0, count($ingFbIds), '?'));
-            // [FIXED] ใช้ $select เพื่อให้ได้ column ครบเหมือน query หลัก
             $sqlFb     = "
               {$select}
                 FROM recipe r
@@ -215,8 +328,10 @@ try {
                WHERE ri.ingredient_id IN ($marksFb)
                ORDER BY r.created_at DESC
                LIMIT ? OFFSET ?";
-            $paramsFb = array_merge($ingFbIds, [$limit, $offset]);
-            $rowsFb   = dbAll($sqlFb, $paramsFb);
+
+            $paramsFbFinal = array_merge($paramsSelect, $ingFbIds, [$limit, $offset]);
+
+            $rowsFb   = dbAll($sqlFb, $paramsFbFinal);
             $data     = array_map($mapRow, $rowsFb);
         }
     }

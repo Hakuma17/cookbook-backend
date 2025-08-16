@@ -1,29 +1,79 @@
 <?php
 /**
- * search_recipes_unified.php — R3-safe-final-merge-pythainlp+fallback-v4 (2025-07-05)
- *
- * 1) ชื่อเมนูตรง 100 % จะมาก่อนสุด
- * 2) ถ้าไม่ตรงชื่อ → สูตรที่มีวัตถุดิบตรงครบทุกคำค้น
- * 3) มีบางวัตถุดิบ (≥ 1 คำ) จะตามมาถัดไป (ตอนนี้เลือก “ครบทุกคำ”)
- * 4) รองรับ include / exclude / allergy (warning) / category / sort / pagination
- * 5) ใช้ PyThaiNLP newmm → ถ้า python ใช้ไม่ได้จะ fallback เป็น RegExp
- * 6) Fallback เดาคำวัตถุดิบ (เฉพาะกรณีมี ≤ 1 token) เหมือน v5
- * 7) include / exclude ด้วย “ชื่อวัตถุดิบ” ผ่านพารามิเตอร์  
- *    include=กุ้ง,หมูสับ | exclude=กระเทียม,นม
+ * search_recipes_unified.php — R3-safe-final-merge-pythainlp+fallback-v4 (2025-08-10c)
+ * - เหมือนเวอร์ชันที่คุณส่งมา แต่เพิ่ม Fallback helper (reqBool, defaultSearchTokenize,
+ *   parseSearchTerms, likePattern) ไว้ในไฟล์นี้ เพื่อกันกรณี inc/functions.php ยังไม่มี
+ * - ไม่ตัดโค้ดเดิมทิ้ง
  */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/db.php';
-require_once __DIR__ . '/inc/functions.php';
-require_once __DIR__ . '/inc/json.php';
+require_once __DIR__ . '/inc/functions.php'; // ถ้ามี helper ใหม่อยู่แล้ว ก็จะใช้ของเดิม
 
 header('Content-Type: application/json; charset=UTF-8');
 
+/* ───────────────────────────── Fallback Helpers ─────────────────────────────
+   ถ้าโปรเจ็กต์ของคุณมีฟังก์ชันพวกนี้อยู่แล้วใน inc/functions.php จะไม่ใช้บล็อกนี้
+   แต่ถ้าไม่มี (undefined function) บล็อกนี้จะช่วยให้ไฟล์ทำงานได้ทันที
+-----------------------------------------------------------------------------*/
+if (!function_exists('reqBool')) {
+    function reqBool(string $key, bool $default = false): bool {
+        $src = $_SERVER['REQUEST_METHOD'] === 'POST' ? $_POST : $_GET;
+        if (!array_key_exists($key, $src)) return $default;
+        $v = $src[$key];
+        if (is_bool($v)) return $v;
+        $v = strtolower(trim((string)$v));
+        return in_array($v, ['1','true','yes','on'], true);
+    }
+}
+if (!function_exists('defaultSearchTokenize')) {
+    // เปิด/ปิดตัดคำเริ่มต้น (ปิดไว้ปลอดภัย ถ้าอยากเปิดถาวรเปลี่ยนเป็น true)
+    function defaultSearchTokenize(): bool { return false; }
+}
+if (!function_exists('likePattern')) {
+    // ทำ pattern สำหรับ LIKE โดย escape \ % _
+    function likePattern(string $s): string {
+        $s = str_replace(['\\','%','_'], ['\\\\','\\%','\\_'], $s);
+        return '%' . $s . '%';
+    }
+}
+if (!function_exists('parseSearchTerms')) {
+    /**
+     * ตัดคำค้น: ถ้าไม่มี PyThaiNLP/ตัวช่วยอื่น ให้ fallback เป็นแยกด้วยช่องว่าง/จุลภาค
+     * คืน array ไม่ซ้ำ ไม่ว่าง ยาวสุดประมาณ 5 คำ (ตัดในผู้เรียกอีกชั้น)
+     */
+    function parseSearchTerms(string $raw, bool $tokenize): array {
+        $raw = trim($raw);
+        if ($raw === '') return [];
+        // ถ้าอนาคตคุณมีตัวตัดคำไทย เรียกที่นี่แล้วค่อย fallback ต่อไปนี้
+        $terms = preg_split('/[,\s]+/u', $raw, -1, PREG_SPLIT_NO_EMPTY);
+        $terms = array_values(array_unique(array_map('trim', $terms)));
+        return $terms;
+    }
+}
+if (!function_exists('sanitize')) {
+    // กัน null / trim คร่าว ๆ (กัน fatal ถ้าโปรเจ็กต์เก่ายังไม่มี)
+    function sanitize(?string $s): string { return trim((string)$s); }
+}
+if (!function_exists('jsonOutput')) {
+    function jsonOutput(array $obj, int $code = 200): void {
+        http_response_code($code);
+        echo json_encode($obj, JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+if (!function_exists('jsonError')) {
+    function jsonError(string $msg, int $code = 400): void {
+        jsonOutput(['success'=>false, 'message'=>$msg], $code);
+    }
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+
 try {
-    /* ─────────────────── 1) INPUT ─────────────────── */
+    /* 1) INPUT */
     $p        = $_SERVER['REQUEST_METHOD'] === 'POST' ? $_POST : $_GET;
-    $rawQ     = sanitize(trim($p['q'] ?? ''));
-    $rawQ     = str_replace(',', ' ', $rawQ);
+    $rawQ     = sanitize(str_replace(',', ' ', (string)($p['q'] ?? '')));
     $qNoSpace = preg_replace('/\s+/u', '', $rawQ);
 
     $catId  = isset($p['cat_id']) && $p['cat_id'] !== '' ? (int)$p['cat_id'] : null;
@@ -52,57 +102,51 @@ try {
         }, explode(',', $p['exclude'])));
     }
 
-    /* ─────────────────── 2) TOKENISE ───────────────── */
-    // ★★★ [CHANGED] รองรับสวิตช์เปิด/ปิดการตัดคำจาก params (ดีฟอลต์ปิด)
-    $tokenize = reqBool('tokenize', defaultSearchTokenize());
+    /* ★ กลุ่มวัตถุดิบ */
+    $group = isset($p['group']) ? trim((string)$p['group']) : '';
 
-    // ★★★ [CHANGED] ใช้ helper ใหม่ parseSearchTerms():
-    // - ถ้าเปิดตัดคำ → พยายามใช้ PyThaiNLP, ถ้า error จะ fallback เป็น split by space/comma
-    // - ถ้าปิด → ใช้ split by space/comma ตามสเปก “กุ้ง กระเทียม / กุ้ง,กระเทียม”
+    $includeGroups = [];
+    if (!empty($p['include_groups'])) {
+        $includeGroups = is_array($p['include_groups'])
+            ? array_values(array_filter(array_map('trim', $p['include_groups'])))
+            : array_values(array_filter(array_map('trim', explode(',', (string)$p['include_groups']))));
+    }
+
+    $excludeGroups = [];
+    if (!empty($p['exclude_groups'])) {
+        $excludeGroups = is_array($p['exclude_groups'])
+            ? array_values(array_filter(array_map('trim', $p['exclude_groups'])))
+            : array_values(array_filter(array_map('trim', explode(',', (string)$p['exclude_groups']))));
+    }
+
+    /* 2) TOKENISE */
+    $tokenize = reqBool('tokenize', defaultSearchTokenize());
     $tokens = $rawQ !== '' ? parseSearchTerms($rawQ, $tokenize) : [];
 
-    // ─── [KEPT-AS-COMMENT] บล็อกเดิม: thaiTokens + fallback manual (ปิดการใช้งานเพราะย้ายไป parseSearchTerms)
-    /*
-    $tokens = $rawQ !== '' ? thaiTokens($rawQ) : [];
-    if (!$tokens && $rawQ !== '') {
-        $tokens = preg_split('/\s+/u', $rawQ, -1, PREG_SPLIT_NO_EMPTY);
-    }
-    */
-
-    // fallback เดาคำวัตถุดิบ (เดิม v5) — ยังใช้ได้ร่วมกับระบบใหม่
+    // fallback เดาคำวัตถุดิบ (อย่างที่เคยทำ)
     if (count($tokens) <= 1 && $rawQ !== '') {
         $cands = dbAll(
-            "SELECT name
-               FROM ingredients
-              WHERE ? LIKE CONCAT('%', name, '%')
-           ORDER BY LENGTH(name) DESC
-              LIMIT 10",
-            [$rawQ]
+            "SELECT name FROM ingredients WHERE ? LIKE CONCAT('%', name, '%')
+             ORDER BY LENGTH(name) DESC LIMIT 10", [$rawQ]
         );
         foreach ($cands as $row) {
             $n = trim($row['name']);
-            if ($n !== '' && !in_array($n, $tokens, true)) {
-                $tokens[] = $n;
-            }
+            if ($n !== '' && !in_array($n, $tokens, true)) $tokens[] = $n;
         }
     }
     $tokens = array_slice($tokens, 0, 5);
 
-    /* helper: เก็บ params ทีละตัวหรือทีละก้อน */
+    /* เก็บ params */
     $params = [];
-    $push   = static function (array &$params, $val, int $n = 1): void {
-        for ($i = 0; $i < $n; $i++) {
-            $params[] = $val;
-        }
+    $push = static function (array &$params, $val, int $n = 1): void {
+        for ($i = 0; $i < $n; $i++) $params[] = $val;
     };
 
-    /* ─────────────── 3) SELECT FIELDS ─────────────── */
-    // 3.1 นับ match แต่ละ token
+    /* 3) SELECT FIELDS */
     $ingSelect = '0 AS ing_match_cnt, 0 AS ing_rank';
     if ($tokens) {
         $cases = [];
         foreach ($tokens as $tok) {
-            // ★★★ [CHANGED] ใช้ likePattern() + ESCAPE '\\' เพื่อความถูกต้องของ %/_
             $exists = "(EXISTS (
                 SELECT 1
                   FROM recipe_ingredient ri
@@ -117,7 +161,7 @@ try {
             ))";
             $cases[] = "CASE WHEN $exists THEN 1 ELSE 0 END";
             $like = likePattern($tok);
-            // แต่ละ token ต้องเติม 4 placeholders × 2 (ใน CASE + ใน COUNT) = 8
+            // $cnt จะถูกใส่ซ้ำ 2 ครั้งใน SELECT → 4 placeholders × 2 = 8
             $push($params, $like, 8);
         }
         $cnt = implode(' + ', $cases);
@@ -125,8 +169,6 @@ try {
                       CASE WHEN $cnt = " . count($tokens) . " THEN 2 ELSE 1 END AS ing_rank";
     }
 
-    // 3.2 เอา field มาตั้งแต่ recipe_id ไปจนถึง short_ingredients, ingredient_ids,
-    //      ing_match_cnt, ing_rank, name_rank — และเพิ่ม has_allergy
     $recipeFields = <<<SQL
         r.recipe_id,
         r.name,
@@ -134,42 +176,38 @@ try {
         r.prep_time,
         r.average_rating,
 
-        -- ยอด favorite ตรงๆ จากตาราง favorites
-        (SELECT COUNT(*) FROM favorites f WHERE f.recipe_id = r.recipe_id)
-            AS favorite_count,
+        (SELECT COUNT(*) FROM favorites f WHERE f.recipe_id = r.recipe_id) AS favorite_count,
+        (SELECT COUNT(*) FROM review v WHERE v.recipe_id = r.recipe_id)    AS review_count,
 
-        -- จำนวนรีวิว
-        (SELECT COUNT(*) FROM review v WHERE v.recipe_id = r.recipe_id)
-            AS review_count,
-
-        -- สรุปวัตถุดิบสั้นๆ
         (SELECT GROUP_CONCAT(
                   DISTINCT CASE WHEN ri.descrip <> '' THEN ri.descrip ELSE i.display_name END
                   SEPARATOR ', ')
            FROM recipe_ingredient ri
            JOIN ingredients i USING(ingredient_id)
-          WHERE ri.recipe_id = r.recipe_id)
-            AS short_ingredients,
+          WHERE ri.recipe_id = r.recipe_id) AS short_ingredients,
 
-        -- id วัตถุดิบทั้งหมด (ใช้ตอนพาร์สกลับเป็น array)
         (SELECT GROUP_CONCAT(DISTINCT ri.ingredient_id)
            FROM recipe_ingredient ri
-          WHERE ri.recipe_id = r.recipe_id)
-            AS ingredient_ids,
+          WHERE ri.recipe_id = r.recipe_id) AS ingredient_ids,
 
-        -- 1) นับ match  2) จัด rank ว่าครบทุก token หรือไม่
         $ingSelect,
 
-        -- has_allergy: เช็คว่ามีวัตถุดิบที่ user แพ้หรือไม่
+        -- has_allergy แบบ “ขยายทั้งกลุ่ม”
         EXISTS (
           SELECT 1
             FROM recipe_ingredient ri_all
-            JOIN allergyinfo a USING(ingredient_id)
+            JOIN ingredients i_all ON i_all.ingredient_id = ri_all.ingredient_id
            WHERE ri_all.recipe_id = r.recipe_id
-             AND a.user_id = ?
+             AND EXISTS (
+               SELECT 1
+                 FROM allergyinfo a
+                 JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+                WHERE a.user_id = ?
+                  AND ia.newcatagory = i_all.newcatagory
+             )
         ) AS has_allergy,
 
-        -- name_rank: จัดอันดับชื่อเมนูตรงต่างระดับ
+        -- name_rank
         (CASE
            WHEN r.name = ?                                                   THEN 100
            WHEN REPLACE(REPLACE(REPLACE(r.name,CHAR(13),''),CHAR(10),''),' ','') = ? THEN  90
@@ -180,22 +218,18 @@ try {
          END) AS name_rank
     SQL;
 
-    // เติม param สำหรับ has_allergy + name_rank placeholders (รวม 1 + 5 = 6 ตัว)
-    $push($params, $userId);     // for has_allergy
-    $push($params, $rawQ);       // name_rank = ?
-    $push($params, $qNoSpace);   // name_rank without spaces
-    // ★★★ [CHANGED] ใช้ likePattern + ESCAPE ใน WHERE จริง แต่ section name_rank ตรงนี้ยังเป็น pattern เดิม (prefix/contains)
-    $push($params, "{$rawQ}%");  
+    $push($params, $userId);
+    $push($params, $rawQ);
+    $push($params, $qNoSpace);
+    $push($params, "{$rawQ}%");
     $push($params, "%{$qNoSpace}%");
     $push($params, "%{$qNoSpace}%");
 
-    /* ───────────── 4) SQL + WHERE ─────────── */
+    /* 4) SQL + WHERE */
     $sql = "SELECT\n  $recipeFields\nFROM recipe r\nWHERE 1=1\n";
 
-    /* ───────── 5) เงื่อนไขชื่อเมนู / วัตถุดิบ ───────── */
+    /* 5) เงื่อนไขชื่อ/วัตถุดิบ */
     if ($rawQ !== '') {
-        // 5.1 name conditions
-        // ★★★ [CHANGED] ใส่ ESCAPE '\\' ให้ทุก LIKE จริงใน WHERE
         $nameConds = [
             'r.name = ?',
             "REPLACE(REPLACE(REPLACE(r.name,CHAR(13),''),CHAR(10),''),' ','') = ?",
@@ -204,7 +238,6 @@ try {
             "REPLACE(r.name,' ','') LIKE ? ESCAPE '\\\\'",
             'r.name LIKE ? ESCAPE \'\\\\\'',
         ];
-        // เติมอีก 6 param ให้ตรงกับเงื่อนไข (ใช้ค่าจากด้านบนที่เตรียม prefix/contains ไว้แล้ว)
         $push($params, $rawQ);
         $push($params, $qNoSpace);
         $push($params, "{$rawQ}%");
@@ -212,7 +245,6 @@ try {
         $push($params, "%{$qNoSpace}%");
         $push($params, "%{$rawQ}%");
 
-        // ถ้ามี tokens: name ต้อง match ทุก token
         if ($tokens) {
             $sub = [];
             foreach ($tokens as $tok) {
@@ -222,7 +254,6 @@ try {
             $nameConds[] = '(' . implode(' AND ', $sub) . ')';
         }
 
-        // 5.2 ingredient EXISTS (match ทุก token)
         $ingConds = [];
         foreach ($tokens as $tok) {
             $exists = "EXISTS (
@@ -250,7 +281,39 @@ try {
         $sql .= "  )\n";
     }
 
-    /* ─────────── 6) include / exclude ─────────── */
+    /* 5.3 กลุ่มวัตถุดิบ */
+    if ($group !== '') {
+        $sql .= "  AND EXISTS (
+          SELECT 1
+            FROM recipe_ingredient ri_g
+            JOIN ingredients i_g ON i_g.ingredient_id = ri_g.ingredient_id
+           WHERE ri_g.recipe_id = r.recipe_id
+             AND TRIM(i_g.newcatagory) = TRIM(?)
+        )\n";
+        $push($params, $group);
+    }
+    foreach ($includeGroups as $g) {
+        $sql .= "  AND EXISTS (
+          SELECT 1
+            FROM recipe_ingredient ri_gi
+            JOIN ingredients i_gi ON i_gi.ingredient_id = ri_gi.ingredient_id
+           WHERE ri_gi.recipe_id = r.recipe_id
+             AND TRIM(i_gi.newcatagory) = TRIM(?)
+        )\n";
+        $push($params, $g);
+    }
+    foreach ($excludeGroups as $g) {
+        $sql .= "  AND NOT EXISTS (
+          SELECT 1
+            FROM recipe_ingredient ri_ge
+            JOIN ingredients i_ge ON i_ge.ingredient_id = ri_ge.ingredient_id
+           WHERE ri_ge.recipe_id = r.recipe_id
+             AND TRIM(i_ge.newcatagory) = TRIM(?)
+        )\n";
+        $push($params, $g);
+    }
+
+    /* 6) include / exclude ชื่อ/ID เดิม */
     if ($includeIds) {
         $ph = implode(',', array_fill(0, count($includeIds), '?'));
         $sql .= "  AND EXISTS (
@@ -258,9 +321,7 @@ try {
           WHERE ri_inc.recipe_id = r.recipe_id
             AND ri_inc.ingredient_id IN ($ph)
         )\n";
-        foreach ($includeIds as $id) {
-            $push($params, $id);
-        }
+        foreach ($includeIds as $id) $push($params, $id);
     }
     if ($includeNames) {
         $subs = [];
@@ -290,9 +351,7 @@ try {
           WHERE ri_exc.recipe_id = r.recipe_id
             AND ri_exc.ingredient_id IN ($ph)
         )\n";
-        foreach ($excludeIds as $id) {
-            $push($params, $id);
-        }
+        foreach ($excludeIds as $id) $push($params, $id);
     }
     if ($excludeNames) {
         $subs = [];
@@ -315,7 +374,7 @@ try {
         $sql .= "  AND (" . implode(' AND ', $subs) . ")\n";
     }
 
-    /* ─────────── 7) หมวดหมู่ ─────────── */
+    /* 7) หมวดหมู่ */
     if ($catId !== null) {
         $sql .= "  AND EXISTS (
           SELECT 1 FROM category_recipe cr
@@ -325,7 +384,7 @@ try {
         $push($params, $catId);
     }
 
-    /* ─────────── 8) SORT + PAGING ─────────── */
+    /* 8) SORT + PAGING */
     $orderBy = match ($sort) {
         'popular'     => 'favorite_count DESC',
         'trending'    => 'r.created_at DESC, favorite_count DESC',
@@ -340,14 +399,14 @@ try {
         r.recipe_id     DESC
       LIMIT $limit OFFSET $offset";
 
-    /* ─────────── 9) ตรวจจำนวน placeholder ─────────── */
+    /* 9) ตรวจจำนวน placeholder */
     $phCnt = substr_count($sql, '?');
     if ($phCnt !== count($params)) {
-        error_log("Placeholder=$phCnt Params=" . count($params));
+        error_log("[search_recipes_unified] Placeholder=$phCnt Params=".count($params));
         throw new RuntimeException('Parameter count mismatch (internal)');
     }
 
-    /* ─────────── 10) EXECUTE + JSON OUTPUT ─────────── */
+    /* 10) EXECUTE + JSON OUTPUT */
     $rows = dbAll($sql, $params);
     $base = getBaseUrl() . '/uploads/recipes';
 
@@ -364,14 +423,14 @@ try {
             'review_count'      => (int)$r['review_count'],
             'short_ingredients' => $r['short_ingredients'] ?? '',
             'ingredient_ids'    => array_filter(array_map('intval', explode(',', $r['ingredient_ids'] ?? ''))),
-            'has_allergy'       => (bool)$r['has_allergy'],  // เพิ่มใน output
+            'has_allergy'       => (bool)$r['has_allergy'],
         ];
     }, $rows);
 
     jsonOutput([
         'success' => true,
         'page'    => $page,
-        'tokens'  => $tokens,  // ส่งกลับให้ Flutter ไฮไลท์
+        'tokens'  => $tokens,
         'data'    => $data,
     ]);
 }

@@ -19,6 +19,18 @@ try {
     $base = getBaseUrl() . '/uploads/recipes';
 
     /* ── 3) SQL ดึงเมนูล่าสุด + meta ─────────────────────────────── */
+
+    /* [OLD] has_allergy แบบเทียบ ingredient_id ตรง ๆ (เก็บไว้เป็นคอมเมนต์)
+       " . ($uid ? "EXISTS (
+              SELECT 1
+                FROM recipe_ingredient ri2
+                JOIN allergyinfo a
+                  ON a.ingredient_id = ri2.ingredient_id
+               WHERE ri2.recipe_id = r.recipe_id
+                 AND a.user_id      = :uid
+            )" : "0") . " AS has_allergy
+    */
+
     $sql = "
         SELECT  r.recipe_id,
                 r.name,
@@ -35,14 +47,19 @@ try {
                              ORDER BY ri.ingredient_id
                              SEPARATOR ',') AS ingredient_ids,
 
-                /* ★ เช็ค allergy จากตาราง allergyinfo */
+                /* ★ [NEW] เช็ค allergy แบบ “กลุ่ม” เทียบ newcatagory */
                 " . ($uid ? "EXISTS (
                      SELECT 1
                        FROM recipe_ingredient ri2
-                       JOIN allergyinfo a
-                         ON a.ingredient_id = ri2.ingredient_id
+                       JOIN ingredients i2 ON i2.ingredient_id = ri2.ingredient_id
                       WHERE ri2.recipe_id = r.recipe_id
-                        AND a.user_id      = :uid
+                        AND EXISTS (
+                            SELECT 1
+                              FROM allergyinfo a
+                              JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+                             WHERE a.user_id = :uid
+                               AND ia.newcatagory = i2.newcatagory
+                        )
                    )" : "0") . " AS has_allergy
 
         FROM      recipe            r
@@ -69,7 +86,7 @@ try {
             'average_rating'    => (float)$row['average_rating'],
             'review_count'      => (int)$row['review_count'],
             'short_ingredients' => $row['short_ingredients'] ?? '',
-            'has_allergy'       => (bool)$row['has_allergy'],      // ★
+            'has_allergy'       => (bool)$row['has_allergy'],      // ★ (คิดแบบกลุ่ม)
             'image_url'         => $base . '/'
                                    . ($row['image_path'] ?: 'default_recipe.jpg'),
             'ingredient_ids'    => array_filter(

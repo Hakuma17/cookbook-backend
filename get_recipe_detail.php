@@ -97,11 +97,28 @@ try {
             $row['current_servings'] = (int)$sv;
         }
 
+        /* [OLD] วิธีเดิม: เทียบ ingredient_id ตรง ๆ (คงไว้เป็นคอมเมนต์)
         $row['has_allergy'] = dbVal("
             SELECT COUNT(*) FROM recipe_ingredient
             WHERE recipe_id = ? AND ingredient_id IN (
                 SELECT ingredient_id FROM allergyinfo WHERE user_id = ?
             )
+        ", [$rid, $uid]) > 0;
+        */
+
+        // [NEW] ขยายเป็น “ทั้งกลุ่ม” โดยเทียบ newcatagory ระหว่างส่วนผสมกับสิ่งที่ผู้ใช้แพ้
+        $row['has_allergy'] = dbVal("
+            SELECT COUNT(*) 
+            FROM recipe_ingredient ri
+            JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
+            WHERE ri.recipe_id = ?
+              AND EXISTS (
+                SELECT 1
+                FROM allergyinfo a
+                JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+                WHERE a.user_id = ?
+                  AND TRIM(ia.newcatagory) = TRIM(i.newcatagory)
+              )
         ", [$rid, $uid]) > 0;
     }
 
@@ -121,6 +138,7 @@ try {
         $c['avatar_url'] = "{$baseProf}/" . basename($pf);
         $c['is_mine']    = ($uid && $c['user_id'] == $uid) ? 1 : 0;
     }
+    unset($c);
     $row['comments'] = $comments;
 
     /** 7) หมวดหมู่ ***********************************************************/

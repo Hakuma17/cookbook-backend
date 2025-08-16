@@ -1,5 +1,5 @@
 <?php
-// get_cart_ingredients.php — รวมวัตถุดิบจากทุกเมนูในตะกร้า
+// get_cart_ingredients.php — รวมวัตถุดิบจากทุกเมนูในตะกร้า (+ ขยายรายการแพ้อาหารเป็นทั้งกลุ่ม)
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
@@ -33,9 +33,28 @@ try {
         WHERE ri.recipe_id IN ($ids)
     ");
 
+    /* 2.5) ดึงรายการแพ้อาหารของผู้ใช้
+     * [OLD] ดึงแบบรายตัว (ไม่ขยายกลุ่ม) — คงไว้เป็นคอมเมนต์ตามคำขอ
+     *
+     * $allergyRows = dbAll('SELECT ingredient_id FROM allergyinfo WHERE user_id = ?', [$userId]);
+     * $allergyIds  = array_map('intval', array_column($allergyRows, 'ingredient_id'));
+     *
+     * [NEW] ขยายเป็น “ทุก ingredient ในกลุ่มเดียวกัน” โดยเทียบ newcatagory
+     */
+    $blockedRows = dbAll("
+        SELECT DISTINCT i2.ingredient_id
+        FROM allergyinfo a
+        JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+        JOIN ingredients i2 ON i2.newcatagory = ia.newcatagory
+        WHERE a.user_id = ?
+    ", [$userId]);
+    $blockedIds = array_map('intval', array_column($blockedRows, 'ingredient_id'));
+    // ช่วยให้ in_array เร็วขึ้น
+    $blockedSet = array_fill_keys($blockedIds, true);
+
     /* 3) รวมยอดตาม ingredient_id+unit */
     $baseUrl = getBaseUrl() . '/uploads/ingredients';
-    $map = [];        // "id_unit" => item
+    $map = [];          // "id_unit" => item
     $unitTracker = [];  // id => set(unit)
 
     foreach ($ings as $g) {
@@ -61,6 +80,8 @@ try {
                 'image_url'     => $g['image_url']
                     ? "{$baseUrl}/" . basename($g['image_url'])
                     : "{$baseUrl}/default_ingredients.png",
+                // ★★★ NEW: ธงแพ้อาหาร (ขยายแบบกลุ่มแล้ว)
+                'has_allergy'   => isset($blockedSet[$id]),
             ];
         } else {
             $map[$key]['quantity'] += $qty;
@@ -68,12 +89,13 @@ try {
         $unitTracker[$id][$unit] = true;
     }
 
-    /* 4) ติดธง unit_conflict */
+    /* 4) ติดธง unit_conflict และปัดทศนิยม */
     foreach ($map as &$m) {
         $iid = $m['ingredient_id'];
         $m['unit_conflict'] = isset($unitTracker[$iid]) && count($unitTracker[$iid]) > 1;
         $m['quantity'] = round($m['quantity'], 2);
     }
+    unset($m);
 
     jsonOutput([
         'success'      => true,
