@@ -1,5 +1,9 @@
 <?php
 // post_comment.php — ผู้ใช้ 1 คนรีวิวได้ 1 ครั้งต่อเมนู (UPDATE แทน INSERT ถ้ามีแล้ว)
+//
+// 2025-08-16 – ★ Idempotent edit:
+//   - ถ้ารีวิวเดิมมีอยู่และ rating/comment "ไม่เปลี่ยน" → คืน success ทันที (ไม่อัปเดต/ไม่โดน Flood Guard)
+//   - Flood Guard 5s ใช้เฉพาะตอน "มีการเปลี่ยนจริง" เท่านั้น
 
 /* ──────────── Dependencies ──────────── */
 require_once __DIR__ . '/inc/functions.php';
@@ -26,33 +30,52 @@ if ($rating < 1 || $rating > 5) {
     jsonOutput(['success' => false, 'message' => 'ให้คะแนน 1-5 ดาวเท่านั้น'], 400);
 }
 
-/* ──────────── Flood Guard (≤ 5 วินาที) ──────────── */
-$createdAt = dbVal("
-    SELECT created_at FROM review
-    WHERE recipe_id = ? AND user_id = ?
-    ORDER BY created_at DESC LIMIT 1
-", [$recipeId, $uid]);
-
-if ($createdAt && strtotime($createdAt) >= time() - 5) {
-    jsonOutput(['success' => false, 'message' => 'รอสักครู่ก่อนคอมเมนต์อีกครั้ง'], 429);
-}
-
 try {
-    /* ──────────── Upsert Review ──────────── */
-    $exists = dbVal(
-        "SELECT 1 FROM review WHERE recipe_id = ? AND user_id = ?",
-        [$recipeId, $uid]
-    );
+    /* ──────────── Load existing review ──────────── */
+    $review = dbOne("
+        SELECT rating, comment, created_at
+          FROM review
+         WHERE recipe_id = ? AND user_id = ?
+         LIMIT 1
+    ", [$recipeId, $uid]);
 
-    if ($exists) {
-        // UPDATE ถ้ามีแล้ว
+    if ($review) {
+        // เทียบว่า "มีการเปลี่ยนจริง" หรือไม่
+        $sameRating  = (float)$review['rating'] === (float)$rating;
+        $sameComment = trim((string)$review['comment']) === $comment;
+        $unchanged   = $sameRating && $sameComment;
+
+        if ($unchanged) {
+            // ★ ไม่เปลี่ยนอะไรเลย → คืนข้อมูลเดิมเป็น success ทันที (idempotent)
+            $c = dbOne("
+                SELECT  r.user_id,
+                        u.profile_name   AS user_name,
+                        u.path_imgProfile AS avatar_url,
+                        r.rating,
+                        r.comment,
+                        r.created_at
+                  FROM review r
+                  JOIN user u ON u.user_id = r.user_id
+                 WHERE r.recipe_id = ? AND r.user_id = ?
+                 LIMIT 1
+            ", [$recipeId, $uid]) ?: (object)[];
+            jsonOutput(['success' => true, 'data' => $c, 'unchanged' => true]);
+        }
+
+        /* ──────────── Flood Guard (≤ 5 วินาที เฉพาะกรณีมีการแก้จริง) ──────────── */
+        if (strtotime($review['created_at']) >= time() - 5) {
+            jsonOutput(['success' => false, 'message' => 'รอสักครู่ก่อนแก้ไขรีวิวอีกครั้ง'], 429);
+        }
+
+        // UPDATE เมื่อมีการเปลี่ยนจริง
         dbExec("
             UPDATE review
                SET rating = ?, comment = ?, created_at = NOW()
              WHERE recipe_id = ? AND user_id = ?
         ", [$rating, $comment, $recipeId, $uid]);
+
     } else {
-        // INSERT ถ้าไม่มี
+        // INSERT ถ้าไม่มีรีวิวเดิม
         dbExec("
             INSERT INTO review (recipe_id, user_id, rating, comment, created_at)
             VALUES (?, ?, ?, ?, NOW())
@@ -62,27 +85,27 @@ try {
     /* ──────────── Recalculate Recipe Stats ──────────── */
     $row = dbOne("
         SELECT AVG(rating) AS avg, COUNT(*) AS cnt
-        FROM review WHERE recipe_id = ?
+          FROM review WHERE recipe_id = ?
     ", [$recipeId]);
 
     dbExec("
         UPDATE recipe 
-           SET average_rating = ?, nReviewer = ? 
+           SET average_rating = ?, nReviewer = ?
          WHERE recipe_id = ?
     ", [round($row['avg'] ?? 0, 2), (int)($row['cnt'] ?? 0), $recipeId]);
 
     /* ──────────── Fetch Latest Review ──────────── */
     $c = dbOne("
         SELECT  r.user_id,
-                u.profile_name AS user_name,
+                u.profile_name   AS user_name,
                 u.path_imgProfile AS avatar_url,
                 r.rating,
                 r.comment,
                 r.created_at
-        FROM review r
-        JOIN user u ON u.user_id = r.user_id
-        WHERE r.recipe_id = ? AND r.user_id = ?
-        LIMIT 1
+          FROM review r
+          JOIN user u ON u.user_id = r.user_id
+         WHERE r.recipe_id = ? AND r.user_id = ?
+         LIMIT 1
     ", [$recipeId, $uid]) ?: (object)[];
 
     /* ──────────── Output JSON ──────────── */

@@ -5,6 +5,8 @@ require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
 require_once __DIR__ . '/inc/db.php'; // ← helper PDO (dbAll, dbVal, ...)
 
+// NOTE: ไม่ลบของเดิม ใส่เป็นคอมเมนต์ไว้ในส่วนที่เปลี่ยน
+
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
 }
@@ -53,13 +55,30 @@ try {
 
     $data = [];
     foreach ($rows as $r) {
-        // ตรวจแพ้สำหรับผู้ใช้ปัจจุบัน
+        // [OLD] วิธีเดิม: เช็คแพ้แบบเทียบ ingredient_id ตรง ๆ (คงไว้เป็นคอมเมนต์)
+        /*
         $hasAllergy = dbVal("
             SELECT COUNT(*)
             FROM recipe_ingredient ri
             WHERE ri.recipe_id = ?
               AND ri.ingredient_id IN (
                     SELECT ingredient_id FROM allergyinfo WHERE user_id = ?
+              )
+        ", [$r['recipe_id'], $uid]) > 0;
+        */
+
+        // [NEW] วิธีใหม่: เช็คแพ้แบบ “กลุ่ม” เทียบ newcatagory
+        $hasAllergy = dbVal("
+            SELECT COUNT(*)
+            FROM recipe_ingredient ri
+            JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
+            WHERE ri.recipe_id = ?
+              AND EXISTS (
+                SELECT 1
+                FROM allergyinfo a
+                JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+                WHERE a.user_id = ?
+                  AND TRIM(ia.newcatagory) = TRIM(i.newcatagory)
               )
         ", [$r['recipe_id'], $uid]) > 0;
 
@@ -83,7 +102,7 @@ try {
             'favorite_count'  => $favCnt,
             'is_favorited'    => true,              // เพราะเป็นเมนูโปรดของผู้ใช้รายนี้
             'image_url'       => $img,
-            'has_allergy'     => $hasAllergy,
+            'has_allergy'     => $hasAllergy,       // ← คิดแบบ “กลุ่ม”
         ];
 
         $data[] = $item;
