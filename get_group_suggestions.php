@@ -101,5 +101,3 @@ try {
     error_log('[get_group_suggestions] ' . $e->getMessage());
     jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }
-
-
