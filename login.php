@@ -30,9 +30,17 @@ try {
     }
 
     //  เช็คยืนยันอีเมลก่อน (หลังจากมีระบบ OTP แล้ว)
-    if ((int)$row['is_verified'] !== 1) {
-        respond(false, ['message' => 'กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ'], 403);
-    }
+    //  เช็คยืนยันอีเมลก่อน (หลังจากมีระบบ OTP แล้ว)
+if ((int)$row['is_verified'] !== 1) {
+    // ส่ง errorCode + must_verify เพื่อให้ FE จับเคสนี้ถูกต้อง
+    jsonOutput([
+        'success'     => false,
+        'message'     => 'กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ',
+        'errorCode'   => 'EMAIL_NOT_VERIFIED',
+        'must_verify' => true
+    ], 403);
+}
+
 
     // กรณีรหัสผ่านไม่ตรง → success=false, HTTP 200
     if (!password_verify($pass, $row['password'] ?? '')) {

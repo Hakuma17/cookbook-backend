@@ -1,24 +1,25 @@
 <?php
-// register.php — สมัครสมาชิก (email + password + username)
+// register.php — สมัครสมาชิก + ส่ง OTP ยืนยันอีเมล (มี email_sent)
 
-require_once __DIR__ . '/inc/functions.php';
-require_once __DIR__ . '/inc/db.php';
-require_once __DIR__ . '/vendor/autoload.php'; // สำหรับ PHPMailer
+require_once __DIR__ . '/inc/functions.php';   // helper: sanitize, jsonOutput
+require_once __DIR__ . '/inc/db.php';          // helper: dbVal, dbExec
+require_once __DIR__ . '/vendor/autoload.php'; // PHPMailer
 
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\SMTP;
 
+/* ───── Method check ───── */
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonOutput(['success' => false, 'errors' => ['Method not allowed']], 405);
 }
 
-// ─────── รับค่าจากผู้ใช้ ───────
+/* ───── รับค่า ───── */
 $email    = trim(sanitize($_POST['email']            ?? ''));
 $pass     =        $_POST['password']         ?? '';
 $confirm  =        $_POST['confirm_password'] ?? '';
 $userName = trim(sanitize($_POST['username']         ?? ''));
 
-// ─────── ตรวจสอบความถูกต้อง ───────
+/* ───── ตรวจอินพุต ───── */
 $errs = [];
 if ($email === '' || $pass === '' || $confirm === '' || $userName === '') {
     $errs[] = 'กรอกข้อมูลให้ครบ';
@@ -32,79 +33,114 @@ if ($pass !== $confirm) {
 if (strlen($pass) < 8) {
     $errs[] = 'รหัสผ่านต้องมีอย่างน้อย 8 ตัว';
 }
-
-// ─────── ตรวจ email ซ้ำ ───────
-if (!$errs) {
-    $dup = dbVal("SELECT 1 FROM user WHERE email = ? LIMIT 1", [$email]);
-    if ($dup) {
-        $errs[] = 'อีเมลนี้มีอยู่แล้ว';
-    }
-}
-
-// ─────── มี error หรือไม่ ───────
 if ($errs) {
     jsonOutput(['success' => false, 'errors' => $errs], 400);
 }
 
-// ─────── สร้าง OTP ───────
-$otp         = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-$sentAt      = date('Y-m-d H:i:s');
-$expiresAt   = date('Y-m-d H:i:s', strtotime('+10 minutes'));
-$isVerified  = 0;
-$reqAttempts = 1; // ✨ เริ่มนับ request OTP สำหรับ rate-limit resend
+/* ───── เช็คอีเมลซ้ำ ───── */
+$dup = dbVal("SELECT 1 FROM user WHERE email = ? LIMIT 1", [$email]);
+if ($dup) {
+    jsonOutput(['success' => false, 'errors' => ['อีเมลนี้มีอยู่แล้ว']], 400);
+}
 
-// ─────── บันทึกลงฐานข้อมูล ───────
-$hash = password_hash($pass, PASSWORD_ARGON2ID);
+/* ───── เตรียม OTP/เวลา ───── */
+$otp       = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT); // สุ่ม 6 หลัก
+$sentAt    = date('Y-m-d H:i:s');                                   // เวลาออก OTP
+$expiresAt = date('Y-m-d H:i:s', strtotime('+10 minutes'));         // อายุ 10 นาที
+
+/* ───── เขียนผู้ใช้ ───── */
+$hash = password_hash($pass, PASSWORD_ARGON2ID); // แฮชรหัสผ่าน
 $ok   = dbExec("
     INSERT INTO user 
         (email, password, profile_name, created_at, is_verified, otp, otp_sent_at, otp_expires_at, request_attempts)
     VALUES 
-        (?, ?, ?, NOW(), ?, ?, ?, ?, ?)
-", [$email, $hash, $userName, $isVerified, $otp, $sentAt, $expiresAt, $reqAttempts]);
+        (?, ?, ?, NOW(), 0, ?, ?, ?, 1)
+", [$email, $hash, $userName, $otp, $sentAt, $expiresAt]);
 
-// ─────── ส่ง OTP ไปยังอีเมลด้วย PHPMailer ───────
+/* ───── ส่งอีเมล OTP ───── */
+$emailSent = false; // ธงว่ามีการส่งจริงไหม
 if ($ok) {
     try {
+        // อ่าน SMTP จาก ENV (อย่า hardcode)
+        $smtpHost = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
+        $smtpUser = getenv('SMTP_USER') ?: 'okeza44@gmail.com';
+        $smtpPass = getenv('SMTP_PASS') ?: 'nlpi ancy nkiq wjwn';             // ต้องตั้งผ่าน ENV
+        $smtpPort = (int)(getenv('SMTP_PORT') ?: 587);
+        $fromName = getenv('MAIL_FROM_NAME') ?: 'Cooking Guide';
+
         $mail = new PHPMailer(true);
-        $mail->CharSet     = 'UTF-8';
-        $mail->isSMTP();
-        $mail->Host        = 'smtp.gmail.com';
+        $mail->CharSet     = 'UTF-8';                     // ภาษาไทย
+        $mail->isSMTP();                                  // ใช้ SMTP
+        $mail->Host        = $smtpHost;
         $mail->SMTPAuth    = true;
-        $mail->Username    = 'okeza44@gmail.com';       // ✅ แก้เป็นอีเมลของคุณ
-        $mail->Password    = 'ufhl etdx gfjh wrsl';      // ✅ App Password
+        $mail->Username    = $smtpUser;
+        $mail->Password    = $smtpPass;
         $mail->SMTPSecure  = PHPMailer::ENCRYPTION_STARTTLS;
-        $mail->Port        = 587;
+        $mail->Port        = $smtpPort;
 
-        $mail->SMTPDebug   = SMTP::DEBUG_SERVER;
-        $mail->Debugoutput = function($str, $level) {
-            error_log("[SMTP DEBUG] {$str}");
-        };
-        $mail->SMTPOptions = [
-            'ssl' => [
-                'verify_peer'       => false,
-                'verify_peer_name'  => false,
-                'allow_self_signed' => true,
-            ],
-        ];
+        // เปิด debug เฉพาะ DEV
+        if (getenv('SMTP_DEBUG') === '1') {
+            $mail->SMTPDebug   = SMTP::DEBUG_SERVER;
+            $mail->Debugoutput = function($str, $level) {
+                error_log("[SMTP DEBUG] {$str}");
+            };
+        }
 
-        $mail->setFrom('okeza44@gmail.com', 'Cooking Guide');
+        // (ออปชัน DEV) ยอม self-signed ถ้าตั้งค่าไว้
+        if (getenv('SMTP_ALLOW_SELF_SIGNED') === '1') {
+            $mail->SMTPOptions = [
+                'ssl' => [
+                    'verify_peer'       => false,
+                    'verify_peer_name'  => false,
+                    'allow_self_signed' => true,
+                ],
+            ];
+        }
+
+        // ที่อยู่ผู้ส่ง/ผู้รับ
+        $mail->setFrom($smtpUser, $fromName);
         $mail->addAddress($email);
+        $mail->addReplyTo($smtpUser, $fromName);
+
+        // เนื้อหา (plain text)
         $mail->isHTML(false);
         $mail->Subject = 'OTP สำหรับยืนยันอีเมล';
         $mail->Body    = "รหัส OTP ของคุณ: {$otp}\nใช้ได้ภายใน 10 นาที";
 
+        // ส่ง
         $mail->send();
-        error_log("[register] OTP email sent to {$email}");
+        $emailSent = true;
+        error_log("[register] OTP email SENT to {$email}");
     } catch (Throwable $e) {
-        error_log("[register] OTP email failed: " . $e->getMessage());
+        // ล้มเหลว → แค่ log ไม่ทำให้การสมัคร fail
+        $emailSent = false;
+        error_log("[register] OTP email FAILED for {$email}: " . $e->getMessage());
         if (isset($mail)) {
             error_log("[register] Mailer ErrorInfo: " . $mail->ErrorInfo);
         }
-        // ไม่ถือว่า fatal error — ให้ผู้ใช้ยืนยัน OTP ผ่านทางอื่น
     }
 }
 
-// ─────── ส่งผลลัพธ์กลับ ───────
-$ok
-    ? jsonOutput(['success' => true, 'message' => 'สมัครสำเร็จ โปรดยืนยันอีเมลด้วย OTP'])
-    : jsonOutput(['success' => false, 'errors' => ['สมัครไม่สำเร็จ ลองใหม่']], 500);
+/* ───── ตอบกลับ FE ───── */
+// success:true เสมอเมื่อ insert สำเร็จ แต่แนบ email_sent ให้ FE ตัดสินใจไปหน้า OTP
+if ($ok) {
+    $resp = [
+        'success'        => true,
+        'email_sent'     => $emailSent,                    // ← สำคัญ
+        'message'        => $emailSent
+            ? 'สมัครสำเร็จ โปรดตรวจอีเมลเพื่อยืนยันด้วย OTP'
+            : 'สมัครสำเร็จ แต่ยังส่งอีเมลไม่สำเร็จ โปรดลอง “ส่งรหัสอีกครั้ง” หรือเช็คสแปม',
+        'otp_expires_at' => $expiresAt,                    // ใช้โชว์เวลาได้
+        'ttl_sec'        => 600,                           // อายุ 600 วินาที
+    ];
+
+    // โหมด DEV: โชว์ OTP ใน response เพื่อเทสต์ง่าย ๆ
+    if (in_array(getenv('APP_ENV'), ['local','dev','development'], true)) {
+        $resp['otp_preview'] = $otp;
+    }
+
+    jsonOutput($resp, 200);
+}
+
+/* ───── กรณี insert พัง ───── */
+jsonOutput(['success' => false, 'errors' => ['สมัครไม่สำเร็จ ลองใหม่']], 500);
