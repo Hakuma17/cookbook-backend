@@ -16,11 +16,15 @@ $body = json_decode(file_get_contents('php://input'), true) ?: [];
 $name = sanitize($body['profile_name'] ?? '');
 $path = trim($body['profile_image'] ?? '');
 
+// ★★★ FIX: ตัด query string (เช่น ?t=...) ออกจาก path รูปภาพ ★★★
+if (($qPos = strpos($path, '?')) !== false) {
+    $path = substr($path, 0, $qPos);
+}
+
 /* ──────────── ตรวจสอบชื่อ ──────────── */
 if ($name === '') {
     jsonOutput(['success' => false, 'message' => 'กรุณาระบุชื่อผู้ใช้'], 400);
 }
-
 /* ──────────── ตรวจสอบ path รูป ──────────── */
 if ($path !== '') {
     if (!preg_match('#^uploads/users/[^/]+\.(jpg|jpeg|png)$#i', $path)) {

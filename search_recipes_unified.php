@@ -207,6 +207,33 @@ try {
              )
         ) AS has_allergy,
 
+        /* ★★★ [NEW] กลุ่มที่ชนกับสิ่งที่ผู้ใช้แพ้ (ส่งเป็น CSV) */
+        (SELECT GROUP_CONCAT(DISTINCT TRIM(i_all.newcatagory) SEPARATOR ',')
+           FROM recipe_ingredient ri_all
+           JOIN ingredients i_all ON i_all.ingredient_id = ri_all.ingredient_id
+          WHERE ri_all.recipe_id = r.recipe_id
+            AND EXISTS (
+              SELECT 1
+                FROM allergyinfo a
+                JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+               WHERE a.user_id = ?
+                 AND ia.newcatagory = i_all.newcatagory
+            )
+        ) AS allergy_groups,
+
+        /* ★★★ [NEW] รายชื่อสำหรับโชว์ชิป: ใช้ชื่อจากรายการแพ้ของผู้ใช้ (representative) */
+        (SELECT GROUP_CONCAT(DISTINCT COALESCE(ia2.display_name, ia2.name) SEPARATOR ',')
+           FROM allergyinfo a2
+           JOIN ingredients ia2 ON ia2.ingredient_id = a2.ingredient_id
+          WHERE a2.user_id = ?
+            AND TRIM(ia2.newcatagory) IN (
+              SELECT TRIM(i_all2.newcatagory)
+                FROM recipe_ingredient ri_all2
+                JOIN ingredients i_all2 ON i_all2.ingredient_id = ri_all2.ingredient_id
+               WHERE ri_all2.recipe_id = r.recipe_id
+            )
+        ) AS allergy_names,
+
         -- name_rank
         (CASE
            WHEN r.name = ?                                                   THEN 100
@@ -218,7 +245,11 @@ try {
          END) AS name_rank
     SQL;
 
-    $push($params, $userId);
+    // ⬇️ เดิมมีแค่ 1 ครั้งสำหรับ has_allergy → เพิ่มอีก 2 ครั้งให้ตรง allergy_groups / allergy_names
+    $push($params, $userId); // has_allergy
+    $push($params, $userId); // allergy_groups
+    $push($params, $userId); // allergy_names
+
     $push($params, $rawQ);
     $push($params, $qNoSpace);
     $push($params, "{$rawQ}%");
@@ -424,6 +455,12 @@ try {
             'short_ingredients' => $r['short_ingredients'] ?? '',
             'ingredient_ids'    => array_filter(array_map('intval', explode(',', $r['ingredient_ids'] ?? ''))),
             'has_allergy'       => (bool)$r['has_allergy'],
+
+            /* ★★★ [NEW] ส่งชื่อกลุ่ม/ชื่อที่ใช้ขึ้นชิป */
+            'allergy_groups'    => array_values(array_filter(array_map('trim',
+                                        explode(',', (string)($r['allergy_groups'] ?? ''))))),
+            'allergy_names'     => array_values(array_filter(array_map('trim',
+                                        explode(',', (string)($r['allergy_names'] ?? ''))))),
         ];
     }, $rows);
 

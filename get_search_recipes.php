@@ -4,7 +4,7 @@
  * - ✅ ใช้ placeholder แบบเดียวทั้งหมดเป็น "?" (PDO ห้ามผสม named + positional)
  * - ✅ ใส่ ESCAPE '\\' กับ LIKE ทุกจุด + sanitize wildcard ด้วย likePatternParam()
  * - ✅ เพิ่มตัวกรองกลุ่ม (group/include_groups/exclude_groups) และธง has_allergy (แบบ “กลุ่ม”)
- * - คอมเมนต์เดิมคงไว้ และทำเครื่องหมาย ★★★ NEW ในส่วนที่เพิ่ม
+ * - ★★★ [NEW] ส่งรายชื่อกลุ่มที่ชน (allergy_groups) และรายชื่อที่ใช้แสดง (allergy_names)
  */
 
 require_once __DIR__ . '/inc/config.php';
@@ -14,9 +14,7 @@ require_once __DIR__ . '/inc/db.php';
 
 header('Content-Type: application/json; charset=UTF-8');
 
-/* ─── Helpers เฉพาะไฟล์นี้ (ไม่กระทบของเดิม) ───────────────────────────── */
 if (!function_exists('likePatternParam')) {
-    // ทำ pattern สำหรับ LIKE โดย escape \ % _
     function likePatternParam(string $s): string {
         $s = str_replace(['\\','%','_'], ['\\\\','\\%','\\_'], $s);
         return '%' . $s . '%';
@@ -69,10 +67,7 @@ try {
 
     $userId = getLoggedInUserId();
 
-    /* ───────────────────────── SELECT หลัก ─────────────────────────
-     * ★★★ [NEW] ใส่ฟิลด์ has_allergy (คำนวณแบบ “กลุ่ม”) ใน SELECT
-     * ✅ ใช้ placeholder "?" เท่านั้น (positional) เพื่อเลี่ยง PDO HY093
-     */
+    /* ───────────────────────── SELECT หลัก ───────────────────────── */
     $select = "
       SELECT DISTINCT
         r.recipe_id AS recipe_id,
@@ -113,14 +108,45 @@ try {
                 WHERE a.user_id = ?
                   AND ia.newcatagory = i_all.newcatagory
              )
-        ) AS has_allergy";
-        $paramsSelect[] = $userId;  // ตำแหน่งตรงกับ ? ใน SELECT ข้างบน
+        ) AS has_allergy,
+
+        /* ★★★ [NEW] กลุ่มที่ชนกับสิ่งที่ผู้ใช้แพ้ (ส่งเป็น CSV) */
+        (SELECT GROUP_CONCAT(DISTINCT TRIM(i_all.newcatagory) SEPARATOR ',')
+           FROM recipe_ingredient ri_all
+           JOIN ingredients i_all ON i_all.ingredient_id = ri_all.ingredient_id
+          WHERE ri_all.recipe_id = r.recipe_id
+            AND EXISTS (
+              SELECT 1
+                FROM allergyinfo a
+                JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+               WHERE a.user_id = ?
+                 AND ia.newcatagory = i_all.newcatagory
+            )
+        ) AS allergy_groups,
+
+        /* ★★★ [NEW] รายชื่อสำหรับโชว์ชิป: ใช้ชื่อจากรายการแพ้ของผู้ใช้ (representative) */
+        (SELECT GROUP_CONCAT(DISTINCT COALESCE(ia2.display_name, ia2.name) SEPARATOR ',')
+           FROM allergyinfo a2
+           JOIN ingredients ia2 ON ia2.ingredient_id = a2.ingredient_id
+          WHERE a2.user_id = ?
+            AND TRIM(ia2.newcatagory) IN (
+                SELECT TRIM(i_all2.newcatagory)
+                  FROM recipe_ingredient ri_all2
+                  JOIN ingredients i_all2 ON i_all2.ingredient_id = ri_all2.ingredient_id
+                 WHERE ri_all2.recipe_id = r.recipe_id
+            )
+        ) AS allergy_names";
+        $paramsSelect[] = $userId;  // for has_allergy
+        $paramsSelect[] = $userId;  // for allergy_groups
+        $paramsSelect[] = $userId;  // for allergy_names
     } else {
         $select .= ",
-        0 AS has_allergy";
+        0 AS has_allergy,
+        NULL AS allergy_groups,     /* ★★★ [NEW] */
+        NULL AS allergy_names       /* ★★★ [NEW] */";
     }
 
-    // ★ name_rank (เพิ่มเมื่อมีคำค้น)
+    // name_rank เมื่อมีคำค้น
     $selectNameRank = '';
     $paramsNameRank = [];
     if ($qLen) {
@@ -137,7 +163,7 @@ try {
     $sql    = $select . $selectNameRank . "\nFROM recipe r";
     $paramsWhere = [];
 
-    /* ───────────────────────── JOINs จาก tokens ───────────────────────── */
+    /* ───────────── tokens → JOIN ───────────── */
     if ($tokens) {
         $i = 0;
         foreach ($tokens as $t) {
@@ -159,7 +185,7 @@ try {
         }
     }
 
-    /* ───────────────────────── include/exclude IDs ───────────────────────── */
+    /* ───────── include/exclude IDs ───────── */
     if ($includeIds) {
         $marks = implode(',', array_fill(0, count($includeIds), '?'));
         $sql .= "
@@ -176,7 +202,7 @@ try {
         : ' WHERE 1';
     $paramsWhere = array_merge($paramsWhere, $excludeIds);
 
-    /* ───────────────────────── กรองชื่อสูตรตามคำค้น ───────────────────────── */
+    /* ───────── ชื่อสูตร ───────── */
     if ($qLen) {
         $sql .= "
           AND (
@@ -194,7 +220,7 @@ try {
         );
     }
 
-    /* ───────────────────────── หมวดหมู่ ───────────────────────── */
+    /* ───────── หมวด ───────── */
     if ($catId !== null) {
         $sql .= "
           AND EXISTS (
@@ -206,7 +232,7 @@ try {
         $paramsWhere[] = $catId;
     }
 
-    /* ───────────────────────── ★★★ NEW: ตัวกรองกลุ่ม ───────────────────────── */
+    /* ───────── ★★★ NEW: กรองกลุ่ม ───────── */
     if ($group !== '') {
         $sql .= "
           AND EXISTS (
@@ -243,7 +269,7 @@ try {
         $paramsWhere[] = $g;
     }
 
-    /* ───────────────────────── ORDER + PAGING ───────────────────────── */
+    /* ───────── ORDER + LIMIT ───────── */
     $orderTrail   = match ($sort) {
         'popular'     => 'favorite_count DESC',
         'trending'    => 'r.created_at DESC, favorite_count DESC',
@@ -258,7 +284,7 @@ try {
 
     $paramsFinal = array_merge($paramsSelect, $paramsNameRank, $paramsWhere, [$limit, $offset]);
 
-    /* ───────────────────────── Execute ───────────────────────── */
+    /* ───────── Execute ───────── */
     $rows   = dbAll($sql, $paramsFinal);
 
     $base   = getBaseUrl() . '/uploads/recipes';
@@ -277,15 +303,17 @@ try {
             'short_ingredients' => $r['short_ingredients'],
             'ingredient_ids'    => array_filter(array_map('intval',
                                        explode(',', $r['ingredient_ids'] ?? ''))),
-            // ★★★ [NEW] ติดธงแพ้อาหารแบบ “กลุ่ม”
             'has_allergy'       => !empty($r['has_allergy']),
+            /* ★★★ [NEW] ส่งชื่อกลุ่ม/ชื่อที่ใช้ขึ้นชิป */
+            'allergy_groups'    => array_values(array_filter(array_map('trim',
+                                       explode(',', (string)($r['allergy_groups'] ?? ''))))),
+            'allergy_names'     => array_values(array_filter(array_map('trim',
+                                       explode(',', (string)($r['allergy_names'] ?? ''))))),
         ];
     };
     $data = array_map($mapRow, $rows);
 
-    /* ───────────────────────── Fallback 1: หาในชื่อสูตร ─────────────────────────
-     * - คง logic เดิม แต่ใช้ $select (ที่มี has_allergy) และ placeholder "?" ทั้งหมด
-     */
+    /* ───────── Fallbacks เดิม ───────── */
     if (empty($data) && $qLen > 0) {
         $qWords = preg_split('/\s+/u', $q, -1, PREG_SPLIT_NO_EMPTY);
         $qWords = array_filter($qWords, fn($s) => mb_strlen($s) >= 2);
@@ -307,7 +335,6 @@ try {
         }
     }
 
-    /* ───────────────────────── Fallback 2: หาในวัตถุดิบ ───────────────────────── */
     if (empty($data) && $qLen > 0) {
         $stmtFb = pdo()->prepare("
             SELECT ingredient_id
