@@ -9,7 +9,7 @@ use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\SMTP;
 
 /* ───── config ───── */
-const OTP_LEN      = 5;
+const OTP_LEN      = 6;
 const OTP_EXP_MIN  = 10;   // นาที
 const COOLDOWN_SEC = 60;
 const MAX_REQ      = 5;
