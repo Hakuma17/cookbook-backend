@@ -8,6 +8,16 @@ if (!function_exists('pdo')) {
 
 // ───────────── PDO wrapper functions ─────────────
 
+// ★ เพิ่ม: dbRow() คืน 1 row แบบ associative หรือ null (เพื่อให้ไฟล์อื่นเรียกได้)
+if (!function_exists('dbRow')) {
+    function dbRow(string $sql, array $params = [], int $mode = PDO::FETCH_ASSOC): ?array
+    {
+        $stmt = pdo()->prepare($sql); // ★ ใช้ pdo() ไม่อิง $pdo global
+        $stmt->execute($params);
+        $row = $stmt->fetch($mode);
+        return $row === false ? null : $row;
+    }
+}
 
 if (!function_exists('dbAll')) {
     function dbAll(string $sql, array $params = [], int $mode = PDO::FETCH_ASSOC): array
