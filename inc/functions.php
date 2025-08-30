@@ -9,12 +9,18 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 /* ───────── 1. PDO ───────── */
-$__pdo = null;
+
+/**
+ * Get the PDO database connection instance.
+ * Uses a static variable to ensure a single connection per request.
+ * @return PDO
+ */
 function pdo(): PDO
 {
-    global $__pdo;
-    if ($__pdo === null) {
-        $__pdo = new PDO(
+    // ★ แก้ไข: ใช้ static variable แทน global เพื่อ Encapsulation ที่ดีกว่า
+    static $pdo = null;
+    if ($pdo === null) {
+        $pdo = new PDO(
             'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4',
             DB_USER,
             DB_PASS,
@@ -25,13 +31,21 @@ function pdo(): PDO
             ]
         );
     }
-    return $__pdo;
+    return $pdo;
 }
 
 /* ───────── 2. Helpers (ทั่วไป) ───────── */
+
+/**
+ * Sanitizes a string for database LIKE queries by trimming whitespace.
+ * WARNING: This function does NOT protect against XSS. Do not use for HTML output.
+ * @param string $v The string to sanitize.
+ * @return string Trimmed string.
+ */
 function sanitize(string $v): string
 {
-    return trim($v);   // ไม่ escape HTML เพื่อให้ LIKE ตรงเป๊ะ
+    // ★ เพิ่มเติม: เพิ่ม comment เตือนเรื่อง XSS
+    return trim($v);
 }
 
 function getBaseUrl(): string
@@ -42,7 +56,7 @@ function getBaseUrl(): string
     return rtrim($scheme . $host . $dir, '/');
 }
 
-function getLoggedInUserId(): ?int        { return $_SESSION['user_id'] ?? null; }
+function getLoggedInUserId(): ?int      { return $_SESSION['user_id'] ?? null; }
 function requireLogin(): int
 {
     $uid = getLoggedInUserId();
@@ -69,21 +83,20 @@ function respond(bool $ok, array $data = [], int $code = 200): void
  */
 function thaiTokens(string $q): array
 {
-    static $cmd = null;                     // cache คำสั่ง
+    static $cmd = null;
 
     if ($cmd === null) {
         // ระบุ path python & สคริปต์ให้ชัด (ปรับตามโครงจริงถ้าแตกต่าง)
         $script = __DIR__ . '/../scripts/thai_tokenize.py';
-        $python = 'python';                 // หรือ python3 / path เต็ม
+        $python = 'python3'; // แนะนำให้ระบุ python3 เพื่อความชัดเจน
         $cmd    = $python . ' -X utf8 ' . escapeshellarg($script);
     }
 
     $descs = [
-        0 => ['pipe', 'r'],   // STDIN
-        1 => ['pipe', 'w'],   // STDOUT
-        2 => ['pipe', 'w'],   // STDERR
+        0 => ['pipe', 'r'], // STDIN
+        1 => ['pipe', 'w'], // STDOUT
+        2 => ['pipe', 'w'], // STDERR
     ];
-    // ครอบด้วย @ เผื่อ proc_open ใช้ไม่ได้ในสภาพแวดล้อมนั้น ๆ
     $proc = @proc_open($cmd, $descs, $pipes, null, null, ['timeout' => 1]);
     if (!is_resource($proc)) {
         return [];
@@ -106,12 +119,13 @@ function thaiTokens(string $q): array
         $tokens = array_values(array_unique($tokens));
         return array_slice($tokens, 0, 5);
     } catch (Throwable $e) {
-        // error_log('[thaiTokens] ' . $e->getMessage());
+        // ★ แก้ไข: เปิด log เพื่อให้ตรวจสอบปัญหาได้ง่ายขึ้น
+        error_log('[thaiTokens] Failed to decode JSON from Python script: ' . $e->getMessage());
         return [];
     }
 }
 
-/* ───────── 4. [NEW] ตัวช่วยสำหรับสวิตช์ "ตัดคำ" & การแยกคำ ───────── */
+/* ───────── 4. ตัวช่วยสำหรับสวิตช์ "ตัดคำ" & การแยกคำ ───────── */
 
 /**
  * อ่าน boolean จากคำขอ (GET/POST)
@@ -133,7 +147,7 @@ function reqBool(string $key, bool $default = false): bool
  */
 function defaultSearchTokenize(): bool
 {
-    return defined('SEARCH_TOKENIZE_DEFAULT') ? (bool)SEARCH_TOKENIZE_DEFAULT : false;
+    return defined('SEARCH_TOKENIZE_DEFAULT') ? (bool)constant('SEARCH_TOKENIZE_DEFAULT') : false;
 }
 
 /**
@@ -152,9 +166,7 @@ function splitSimpleTerms(string $q): array
 }
 
 /**
- * parseSearchTerms:
- * - เมื่อ $tokenize = true → ใช้ thaiTokens($q) หากล้มเหลว fallback เป็น splitSimpleTerms($q)
- * - เมื่อ $tokenize = false → ใช้ splitSimpleTerms($q) ตามสเปก “กุ้ง กระเทียม / กุ้ง,กระเทียม”
+ * parseSearchTerms: แยกคำค้นหาโดยเลือกระหว่างตัดคำไทยหรือแบบง่าย
  */
 function parseSearchTerms(string $q, bool $tokenize = false): array
 {
@@ -176,4 +188,65 @@ function likePattern(string $term): string
 {
     $term = str_replace(['%', '_'], ['\\%', '\\_'], $term);
     return '%' . $term . '%';
+}
+
+
+/* ───────── 5. ★ ใหม่: Helpers สำหรับแอปพลิเคชัน (Cart/Ingredient) ───────── */
+
+/**
+ * ทำ URL รูปภาพให้เป็น absolute + fallback ถ้าไฟล์ไม่มีจริง
+ */
+function normalizeImageUrl(?string $raw, string $defaultFile = 'default_ingredients.png'): string
+{
+    $baseUrl  = rtrim(getBaseUrl(), '/');
+    $baseWeb  = $baseUrl . '/uploads/ingredients';
+    $basePath = __DIR__ . '/../uploads/ingredients'; // Path จาก root ของ project
+
+    $raw = trim((string)$raw);
+    if ($raw === '') return $baseWeb . '/' . $defaultFile;
+
+    if (preg_match('~^https?://~i', $raw)) return $raw;
+
+    $filename = basename(str_replace('\\', '/', $raw));
+    $abs = $basePath . '/' . $filename;
+    if (is_file($abs)) return $baseWeb . '/' . $filename;
+
+    if (strpos($filename, 'ingredient_') === 0) {
+        $alt = 'ingredients_' . substr($filename, strlen('ingredient_'));
+        if (is_file($basePath . '/' . $alt)) return $baseWeb . '/' . $alt;
+    }
+    return $baseWeb . '/' . $defaultFile;
+}
+
+/**
+ * แปลง nutrition_id → กลุ่มวัตถุดิบ (code/name สั้น)
+ */
+function mapGroupFromNutritionId(?string $nid): array
+{
+    $nid = trim((string)$nid);
+
+    if ($nid === '') {
+        $code = '16';
+    } elseif (preg_match('/^([0-9]{2})/', $nid, $m)) {
+        $code = $m[1];
+    } elseif (preg_match('/^([A-Z])/', $nid, $m)) {
+        $letter = $m[1];
+        $letterMap = [
+            'A'=>'01', 'B'=>'02', 'C'=>'03', 'D'=>'04', 'E'=>'05',
+            'F'=>'06', 'G'=>'07', 'H'=>'08', 'J'=>'09', 'K'=>'10',
+            'M'=>'12', 'N'=>'10', 'Q'=>'11', 'S'=>'11', 'T'=>'11',
+            'U'=>'16', 'Z'=>'16',
+        ];
+        $code = $letterMap[$letter] ?? '16';
+    } else {
+        $code = '16';
+    }
+
+    $short = [
+        '01'=>'ธัญพืช','02'=>'ราก/หัว','03'=>'ถั่ว/เมล็ด','04'=>'ผัก','05'=>'ผลไม้',
+        '06'=>'เนื้อสัตว์','07'=>'สัตว์น้ำ','08'=>'ไข่','09'=>'นม',
+        '10'=>'เครื่องปรุง','11'=>'พร้อมกิน','12'=>'ของหวาน','13'=>'แมลง',
+        '14'=>'อื่นๆ','16'=>'อื่นๆ',
+    ];
+    return [$code, $short[$code] ?? 'อื่นๆ'];
 }
