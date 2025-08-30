@@ -2,7 +2,7 @@
 // get_allergy_list.php — รายการวัตถุดิบที่ผู้ใช้แพ้ (+ groups summary)
 
 require_once __DIR__ . '/inc/config.php';
-require_once __DIR__ . '/inc/functions.php';
+require_once __DIR__ . '/inc/functions.php'; // ★ เรียกใช้ฟังก์ชันกลางจากที่นี่
 require_once __DIR__ . '/inc/db.php';
 
 header('Content-Type: application/json; charset=UTF-8');
@@ -11,32 +11,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
 }
 
-/**
- * ทำ URL รูปภาพให้เป็น absolute + fallback ถ้าไฟล์ไม่มีจริง
- * - ปล่อยผ่านกรณีเป็น http/https
- * - หากชื่อขึ้นต้น "ingredient_" จะลองสลับเป็น "ingredients_" ให้อัตโนมัติ
- * - $defaultFile เลือก default ให้ตรงบริบท: รายตัว = default_ingredients.png, กลุ่ม = default_group.png
- */
-function normalizeImageUrl(?string $raw, string $defaultFile = 'default_ingredients.png'): string {
-    $baseUrl  = rtrim(getBaseUrl(), '/');
-    $baseWeb  = $baseUrl . '/uploads/ingredients';
-    $basePath = __DIR__ . '/uploads/ingredients';
-
-    $raw = trim((string)$raw);
-    if ($raw === '') return $baseWeb . '/' . $defaultFile;
-
-    if (preg_match('~^https?://~i', $raw)) return $raw;
-
-    $filename = basename(str_replace('\\', '/', $raw));
-    $abs = $basePath . '/' . $filename;
-    if (is_file($abs)) return $baseWeb . '/' . $filename;
-
-    if (strpos($filename, 'ingredient_') === 0) {
-        $alt = 'ingredients_' . substr($filename, strlen('ingredient_'));
-        if (is_file($basePath . '/' . $alt)) return $baseWeb . '/' . $alt;
-    }
-    return $baseWeb . '/' . $defaultFile;
-}
+// ★ ลบ: ฟังก์ชัน normalizeImageUrl ถูกย้ายไปที่ inc/functions.php แล้ว
 
 try {
     $userId = requireLogin();
@@ -54,17 +29,15 @@ try {
     foreach ($rows as &$r) {
         $r['ingredient_id'] = (int)$r['ingredient_id'];
         $r['id']            = $r['ingredient_id']; // alias ให้ FE reuse model เดิมได้
+        // เรียกใช้ฟังก์ชันกลาง
         $r['image_url']     = normalizeImageUrl($r['image_url'], 'default_ingredients.png');
     }
     unset($r);
 
-    // ทำดิกชันนารีช่วย lookup ชื่อ/รูปตาม id (ใช้ตอน build groups)
-    $nameById  = [];
-    $imageById = [];
-    foreach ($rows as $x) {
-        $nameById[$x['ingredient_id']]  = $x['name'] ?? '';
-        $imageById[$x['ingredient_id']] = $x['image_url'] ?? '';
-    }
+    // ★ แก้ไข: ทำดิกชันนารีช่วย lookup โดยใช้ array_column เพื่อความกระชับ
+    $nameById  = array_column($rows, 'name', 'ingredient_id');
+    $imageById = array_column($rows, 'image_url', 'ingredient_id');
+
 
     // ───────────────────────────────────────────────────────────────
     // 2) Summary เป็น “กลุ่มที่แพ้”
@@ -86,16 +59,16 @@ try {
     ", [$userId]);
 
     foreach ($groups as &$g) {
-        $g['representative_ingredient_id'] = (int)$g['representative_ingredient_id'];
-
-        $repId   = $g['representative_ingredient_id'];
+        $repId = (int)$g['representative_ingredient_id'];
         $repName = $nameById[$repId] ?? ($g['group_name'] ?? '');
         $repImg  = $imageById[$repId] ?? ''; // อาจว่างถ้าไม่เจอใน rows (กันไว้)
 
+        $g['representative_ingredient_id'] = $repId;
         $g['representative_name'] = $repName;
         $g['image_url']           = $repImg !== ''
             ? $repImg
-            : normalizeImageUrl('', 'default_group.png'); // fallback ของกลุ่ม
+            // เรียกใช้ฟังก์ชันกลาง
+            : normalizeImageUrl('', 'default_group.png');
 
         // ฟิลด์เพิ่มเติมเผื่อ FE ใช้
         $g['api_group_value'] = $g['group_name'];
@@ -106,11 +79,11 @@ try {
 
     jsonOutput([
         'success' => true,
-        'data'    => $rows,    // รายตัวที่แพ้ (id, name, image_url absolute)
-        'groups'  => $groups   // กลุ่มที่แพ้ (group_name, representative_ingredient_id, representative_name, image_url absolute)
+        'data'    => $rows,   // รายตัวที่แพ้ (id, name, image_url absolute)
+        'groups'  => $groups  // กลุ่มที่แพ้ (group_name, representative_ingredient_id, representative_name, image_url absolute)
     ]);
 
 } catch (Throwable $e) {
-    error_log('[get_allergy_list] ' . $e->getMessage());
+    error_log('[get_allergy_list] ' . $e->getMessage() . ' on line ' . $e->getLine());
     jsonOutput(['success' => false, 'message' => 'Server error'], 500);
 }
