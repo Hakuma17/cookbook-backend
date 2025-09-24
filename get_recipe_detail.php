@@ -1,5 +1,49 @@
 <?php
-// get_recipe_detail.php — คืน JSON { success, data }
+/**
+ * get_recipe_detail.php — รายละเอียดสูตรเต็ม (Full Recipe Detail)
+ * =====================================================================================
+ * INPUT:
+ *   - GET id=<recipe_id:int>
+ * OUTPUT (success=true):
+ *   {
+ *     success: true,
+ *     data: {
+ *       recipe_id, name, image_urls[string[]], prep_time, nServings,
+ *       average_rating, review_count, created_at, source_reference,
+ *       ingredients: [{ ingredient_id, name, image_url, quantity, unit, grams_actual, descrip }...],
+ *       steps: [{ step_number, description }...],
+ *       nutrition: { calories, protein, fat, carbs },
+ *       is_favorited (bool), user_rating (int|null), current_servings (int), has_allergy (bool),
+ *       comments: [{ user_id, user_name, path_imgProfile, rating, comment, created_at, avatar_url, is_mine }...],
+ *       categories: [category_name,...]
+ *     }
+ *   }
+ *   กรณีไม่พบ → 404 { success:false, message }
+ *
+ * ALLERGY CHECK:
+ *   - ใช้ EXISTS เปรียบเทียบ newcatagory (กลุ่ม) ระหว่างส่วนผสมในสูตร กับรายการแพ้ของผู้ใช้
+ *   - เหตุผล: ป้องกันกรณีผู้ใช้แพ้กลุ่มแต่ไม่ได้ลงรายการ ingredient id ครบทุกตัว
+ *
+ * NUTRITION AGGREGATION:
+ *   - สูตรรวม: sum(nutrient_per100g * grams_actual / 100)
+ *   - ไม่มีการ normalize ต่อหนึ่งหน่วยเสิร์ฟ ณ ตอนนี้ (client สามารถหารด้วย current_servings ได้เอง)
+ *
+ * PERFORMANCE NOTES:
+ *   - หลาย subquery/aggregation (ingredients, steps, reviews, nutrition) → ใช้ 4-5 query แยกง่ายต่อ caching รายส่วน
+ *   - อาจใช้ caching (Redis) สำหรับ guest หรือ TTL สั้นสำหรับ popular recipes
+ *   - ดัชนีแนะนำ: review(recipe_id,user_id), favorites(recipe_id,user_id), cart(recipe_id,user_id), step(recipe_id), recipe_ingredient(recipe_id)
+ *
+ * SECURITY:
+ *   - READ only; ป้องกัน method mismatch
+ *   - ใช้โหมด prepared (dbOne/dbAll/dbVal) → กัน SQL injection
+ *   - ไม่เผยแพร่ internal path (รูปใช้ basename เท่านั้น)
+ *
+ * EXTENSION IDEAS / TODO:
+ *   - เพิ่มฟิลด์ allergy_groups / allergy_names เหมือน endpoints listing (ตอนนี้คืน has_allergy อย่างเดียว)
+ *   - ใส่ cache ETag/If-None-Match เพื่อลด bandwidth
+ *   - รองรับการ scale serving ปรับสูตร (คำนวณ ingredients ปรับตาม current_servings)
+ * =====================================================================================
+ */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';

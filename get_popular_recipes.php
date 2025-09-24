@@ -1,7 +1,34 @@
 <?php
-// get_popular_recipes.php — สูตร “ยอดนิยม” 10 รายการ
-//  ★ เพิ่ม favorite_count + จัดอันดับตาม favorite_count DESC
-//  ★★★ [NEW] ส่ง allergy_groups / allergy_names มาด้วย
+/**
+ * get_popular_recipes.php — ดึงสูตร "ยอดนิยม" 10 รายการ (เรียงจาก favorite_count สูงสุด รองด้วย average_rating)
+ * =====================================================================================
+ * CRITERIA:
+ *   - popularity หลัก = จำนวนผู้กด favorite (favorite_count)
+ *   - tie-breaker = average_rating (DESC)
+ *   - fallback order (ในกรณีคะแนนเท่ากันทั้งสอง) = ลำดับที่ DB คืน (ไม่มีระบุ created_at)
+ *
+ * RESPONSE FIELDS (ออบเจ็กต์หนึ่งรายการ):
+ *   recipe_id, name, prep_time|null,
+ *   favorite_count, average_rating, review_count,
+ *   short_ingredients (string), ingredient_ids[int...],
+ *   image_url, has_allergy (bool), allergy_groups[string...], allergy_names[string...]
+ *
+ * ALLERGY (เหมือน endpoint ใหม่อื่น ๆ):
+ *   - เทียบด้วย newcatagory group → ลด false negative กรณีผู้ใช้แพ้ทั้งหมวด
+ *
+ * PERFORMANCE NOTES:
+ *   - Subqueries COUNT/AVG per row → ถ้า table ใหญ่มากควร materialize (เช่น recipe.favorite_count_cached)
+ *   - ดัชนีแนะนำ: favorites(recipe_id), review(recipe_id), recipe(created_at) แม้ไม่ได้ใช้ order แต่ช่วย join/subquery
+ *   - GROUP_CONCAT มีเพดานความยาว → ถ้าวัตถุดิบมากอาจ truncate (ปรับ group_concat_max_len หากจำเป็น)
+ *
+ * IMAGE FALLBACK STRATEGY:
+ *   - ตรวจว่ามี default_recipe.png ถ้าไม่มีลอง .jpg แล้วค่อย fallback เป็น .png
+ *
+ * EXTENSIBILITY / TODO:
+ *   - รองรับ ?limit= / ?page= เพิ่มเติมถ้าต้องการ endless scroll
+ *   - อาจเพิ่ม metric อื่น (เช่น review_count weight) = recommended โหมดแยก
+ * =====================================================================================
+ */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';

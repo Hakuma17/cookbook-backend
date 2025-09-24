@@ -1,10 +1,22 @@
 <?php
 /**
- * search_recipes.php — unified + groups + allergy-flag (POS-ONLY placeholders)
- * - ✅ ใช้ placeholder แบบเดียวทั้งหมดเป็น "?" (PDO ห้ามผสม named + positional)
- * - ✅ ใส่ ESCAPE '\\' กับ LIKE ทุกจุด + sanitize wildcard ด้วย likePatternParam()
- * - ✅ เพิ่มตัวกรองกลุ่ม (group/include_groups/exclude_groups) และธง has_allergy (แบบ “กลุ่ม”)
- * - ★★★ [NEW] ส่งรายชื่อกลุ่มที่ชน (allergy_groups) และรายชื่อที่ใช้แสดง (allergy_names)
+ * get_search_recipes.php (LEGACY / SIMPLE SEARCH)
+ * =====================================================================
+ * เวอร์ชันดั้งเดิม / เบากว่า ของ unified search:
+ *   - JOIN recipe_ingredient ต่อ token (INNER JOIN * n) → กรองให้ “ต้องมีทุก token”
+ *   - มีตัวกรอง include/exclude ingredient IDs + groups (newcatagory)
+ *   - มี name_rank อย่างง่าย (เทียบตรง / ตัดช่องว่าง / LIKE prefix)
+ *   - เพิ่มข้อมูลแพ้ (has_allergy, allergy_groups, allergy_names) เช่นเดียวกับ unified
+ *   - มี fallback 2 ชั้นท้ายไฟล์ (ค้นชื่อแบบ AND tokens, และค้นจาก ingredient id)
+ * แตกต่างจากไฟล์ unified:
+ *   - ไม่มีการคำนวณ ing_match_cnt / ing_rank
+ *   - ไม่มีการประกอบชุดเงื่อนไขชื่อแบบ OR + AND ของ token (ใช้ JOIN บังคับ AND โดยโครงสร้าง)
+ *   - SELECT DISTINCT + INNER JOIN หลายครั้ง อาจช้าถ้าจำนวน token มาก (จำกัดเองตอนใช้งาน)
+ * ข้อควรทราบ:
+ *   - ใช้ placeholders “?” ทั้งหมด ป้องกัน SQL injection
+ *   - LIKE ทุกจุด escape wildcard (%/_) + backslash
+ *   - limit capped 50, มี total (filtered count) + total_recipes (global)
+ * =====================================================================
  */
 
 require_once __DIR__ . '/inc/config.php';
@@ -22,6 +34,7 @@ if (!function_exists('likePatternParam')) {
 }
 
 try {
+  // 1) ดึงพารามิเตอร์พื้นฐาน
     $p        = ($_SERVER['REQUEST_METHOD'] === 'POST') ? $_POST : $_GET;
     $q        = sanitize($p['q'] ?? '');
     $qNoSpc   = preg_replace('/\s+/u', '', $q);
@@ -38,7 +51,7 @@ try {
     $includeIds = array_filter(array_map('intval', $incRaw));
     $excludeIds = array_filter(array_map('intval', $excRaw));
 
-    $tokens = [];
+  $tokens = []; // tokens วัตถุดิบ (คั่นด้วย , หรือ space หรือ ;) แบบง่าย
     if (!empty($p['ingredients'])) {
         $tokens = preg_split('/[,\s;]+/u', $p['ingredients'], -1, PREG_SPLIT_NO_EMPTY);
         $tokens = array_map('trim', $tokens);
@@ -67,7 +80,7 @@ try {
 
     $userId = getLoggedInUserId();
 
-    /* ───────────────────────── SELECT หลัก ───────────────────────── */
+  /* ───────────────────────── SELECT หลัก + allergy joins ───────────────────────── */
     $select = "
       SELECT DISTINCT
         r.recipe_id AS recipe_id,
@@ -93,7 +106,7 @@ try {
 
     $paramsSelect = [];
 
-    if ($userId) {
+  if ($userId) { // ถ้ามีผู้ใช้ → คำนวณข้อมูลแพ้ตามกลุ่ม
         $select .= ",
         /* [NEW] has_allergy: เทียบ newcatagory ระหว่างส่วนผสมกับสิ่งที่ผู้ใช้แพ้ */
         EXISTS (
@@ -146,7 +159,7 @@ try {
         NULL AS allergy_names       /* ★★★ [NEW] */";
     }
 
-    // name_rank เมื่อมีคำค้น
+  // name_rank เมื่อมีคำค้น (เวอร์ชันย่อ 3 ระดับ)
     $selectNameRank = '';
     $paramsNameRank = [];
     if ($qLen) {
@@ -163,7 +176,7 @@ try {
     $sql    = $select . $selectNameRank . "\nFROM recipe r";
     $paramsWhere = [];
 
-    /* ───────────── tokens → JOIN ───────────── */
+  /* ───────────── tokens → JOIN (AND semantics ผ่าน INNER JOIN n ครั้ง) ───────────── */
     if ($tokens) {
         $i = 0;
         foreach ($tokens as $t) {
@@ -185,7 +198,7 @@ try {
         }
     }
 
-    /* ───────── include/exclude IDs ───────── */
+  /* ───────── include / exclude ingredient IDs ───────── */
     if ($includeIds) {
         $marks = implode(',', array_fill(0, count($includeIds), '?'));
         $sql .= "
@@ -202,7 +215,7 @@ try {
         : ' WHERE 1';
     $paramsWhere = array_merge($paramsWhere, $excludeIds);
 
-    /* ───────── ชื่อสูตร ───────── */
+  /* ───────── ตัวกรองชื่อ (ตรง/ตัดช่องว่าง/prefix LIKE และ compressed LIKE) ───────── */
     if ($qLen) {
         $sql .= "
           AND (
@@ -220,7 +233,7 @@ try {
         );
     }
 
-    /* ───────── หมวด ───────── */
+  /* ───────── หมวดหมู่ (category) ───────── */
     if ($catId !== null) {
         $sql .= "
           AND EXISTS (
@@ -232,7 +245,7 @@ try {
         $paramsWhere[] = $catId;
     }
 
-    /* ───────── ★★★ NEW: กรองกลุ่ม ───────── */
+  /* ───────── กรองกลุ่ม (group / include_groups / exclude_groups) ───────── */
     if ($group !== '') {
         $sql .= "
           AND EXISTS (
@@ -269,23 +282,29 @@ try {
         $paramsWhere[] = $g;
     }
 
-    /* ───────── ORDER + LIMIT ───────── */
-    $orderTrail   = match ($sort) {
-        'popular'     => 'favorite_count DESC',
-        'trending'    => 'r.created_at DESC, favorite_count DESC',
-        'recommended' => 'r.average_rating DESC, review_count DESC',
-        default       => 'r.created_at DESC',
-    };
+  /* ───────── ORDER + LIMIT (เรียงโดย name_rank ก่อน ถ้ามี) ───────── */
+  $orderTrail   = match ($sort) {
+    'name_asc'    => 'r.name ASC',
+    'popular'     => 'favorite_count DESC',
+    'trending'    => 'r.created_at DESC, favorite_count DESC',
+    'recommended' => 'r.average_rating DESC, review_count DESC',
+    default       => 'r.created_at DESC',
+  };
     $orderNameRank = $qLen ? 'name_rank DESC,' : '';
+
+    $sqlNoPaging = $sql . "
+      ORDER BY {$orderNameRank} {$orderTrail}";
 
     $sql .= "
       ORDER BY {$orderNameRank} {$orderTrail}
       LIMIT ? OFFSET ?";
 
-    $paramsFinal = array_merge($paramsSelect, $paramsNameRank, $paramsWhere, [$limit, $offset]);
+  $paramsNoPaging = array_merge($paramsSelect, $paramsNameRank, $paramsWhere);
+  $paramsFinal    = array_merge($paramsNoPaging, [$limit, $offset]);
 
-    /* ───────── Execute ───────── */
-    $rows   = dbAll($sql, $paramsFinal);
+  /* ───────── Execute + Map Row ───────── */
+  $total  = (int)dbVal("SELECT COUNT(*) FROM ( $sqlNoPaging ) AS _t", $paramsNoPaging);
+  $rows   = dbAll($sql, $paramsFinal);
 
     $base   = getBaseUrl() . '/uploads/recipes';
     $mapRow = function($r) use ($base) {
@@ -313,8 +332,8 @@ try {
     };
     $data = array_map($mapRow, $rows);
 
-    /* ───────── Fallbacks เดิม ───────── */
-    if (empty($data) && $qLen > 0) {
+  /* ───────── Fallbacks ชั้นที่ 1: ลอง AND LIKE ต่อคำ ───────── */
+  if (empty($data) && $qLen > 0) { // Fallback ชั้นที่ 2: หา ingredient id จากชื่อ/ชื่อแสดง แล้ว reverse lookup สูตร
         $qWords = preg_split('/\s+/u', $q, -1, PREG_SPLIT_NO_EMPTY);
         $qWords = array_filter($qWords, fn($s) => mb_strlen($s) >= 2);
         if ($qWords) {
@@ -363,9 +382,15 @@ try {
         }
     }
 
-    jsonOutput([
+  $totalRecipes = (int)dbVal('SELECT COUNT(*) FROM recipe');
+  jsonOutput([
         'success' => true,
         'page'    => $page,
+    'limit'   => $limit,
+    'has_next'=> ($page * $limit < $total),
+    'count'   => count($data),
+    'total'   => $total,
+    'total_recipes' => $totalRecipes,
         'data'    => $data,
     ]);
 

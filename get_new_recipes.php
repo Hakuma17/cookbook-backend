@@ -1,7 +1,45 @@
 <?php
-// get_new_recipes.php — ดึง “สูตรมาใหม่” 10 รายการล่าสุด
-// ส่งกลับ field เพิ่ม: favorite_count, has_allergy
-// ★★★ [NEW] ส่ง allergy_groups / allergy_names
+/**
+ * get_new_recipes.php — ดึง “สูตรมาใหม่” (ล่าสุดตาม created_at) จำกัด 10 รายการ
+ * =====================================================================================
+ * RESPONSE STRUCTURE (success=true):
+ *   {
+ *     success: true,
+ *     data: [
+ *       {
+ *         recipe_id, name, prep_time|null,
+ *         favorite_count, average_rating, review_count,
+ *         short_ingredients (string ย่อ), ingredient_ids[int...],
+ *         image_url, has_allergy (แพ้แบบเทียบกลุ่ม newcatagory),
+ *         allergy_groups[string...],   // รายชื่อกลุ่มที่ชน (Trim แล้ว ไม่ซ้ำ)
+ *         allergy_names[string...]     // Display name ของวัตถุดิบที่อยู่ในกลุ่มที่ผู้ใช้แพ้
+ *       }, ... (สูงสุด 10)
+ *     ]
+ *   }
+ * หมายเหตุ: ถ้าไม่ล็อกอิน → has_allergy = false, allergy_groups / allergy_names = []
+ *
+ * SECURITY / VALIDATION:
+ *   - อ่านอย่างเดียว (GET) ป้องกันด้วย method check
+ *   - ใช้ prepared statements (dbAll) ปลอด SQL injection
+ *
+ * PERFORMANCE & INDEX HINT:
+ *   - ใช้ subquery COUNT / AVG ต่อ recipe: ถ้าปริมาณมากควรพิจารณา denormalize เก็บ favorite_count / avg_rating คอลัมน์ในตาราง recipe
+ *   - GROUP_CONCAT อาจตัดหาก ingredient เยอะมาก (ค่าเริ่มต้น group_concat_max_len ~1024/1024* bytes) → ถ้าข้อมูลยาวควร SET SESSION group_concat_max_len เพิ่ม (ยังไม่จำเป็น immediate)
+ *   - เพิ่มดัชนี: recipe(created_at), favorites(recipe_id), review(recipe_id), recipe_ingredient(recipe_id)
+ *
+ * ALLERGY LOGIC:
+ *   - has_allergy: EXISTS วัตถุดิบในสูตรใด ๆ ที่ newcatagory ตรงกับรายการแพ้ของผู้ใช้ (เปรียบเทียบแบบ “กลุ่ม”) ลดปัญหา duplicate ingredient object
+ *   - allergy_groups: ดึงรายการกลุ่มที่ชนเพื่อให้ FE ขึ้น chip สรุป
+ *   - allergy_names: รวบรวม display_name ของวัตถุดิบแพ้ในกลุ่มที่เกี่ยวข้องเพื่อโชว์ชื่อมนุษย์อ่านง่าย
+ *
+ * COMPATIBILITY:
+ *   - image_url: ใช้ default_recipe.png ให้ตรงกับ endpoint อื่น (ถ้าระบบจริงใช้ .jpg ทั้งหมด อาจเพิ่มไฟล์ .png เช่นเดียวกันเพื่อไม่สับสน)
+ *
+ * TODO (Optional):
+ *   - เพิ่ม pagination (?page / ?limit) หากต้องการโหลดเพิ่มทีหลัง
+ *   - Cache ชั้นบาง (เช่น Redis) สำหรับ guest เพื่อลด repeated aggregation
+ * =====================================================================================
+ */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
