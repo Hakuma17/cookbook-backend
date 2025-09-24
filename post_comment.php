@@ -1,9 +1,27 @@
 <?php
-// post_comment.php — ผู้ใช้ 1 คนรีวิวได้ 1 ครั้งต่อเมนู (UPDATE แทน INSERT ถ้ามีแล้ว)
-//
-// 2025-08-16 – ★ Idempotent edit:
-//   - ถ้ารีวิวเดิมมีอยู่และ rating/comment "ไม่เปลี่ยน" → คืน success ทันที (ไม่อัปเดต/ไม่โดน Flood Guard)
-//   - Flood Guard 5s ใช้เฉพาะตอน "มีการเปลี่ยนจริง" เท่านั้น
+/**
+ * post_comment.php — สร้างหรือแก้ไขรีวิว (rating + comment) ต่อสูตร (ผู้ใช้ 1 คน 1 รีวิวต่อ 1 recipe)
+ * =====================================================================================
+ * METHOD: POST
+ * PARAMS:
+ *   - recipe_id (int > 0)
+ *   - rating   (float 1..5)
+ *   - comment  (string อนุญาตว่าง)
+ * LOGIC:
+ *   1) ตรวจว่าผู้ใช้เคยรีวิวหรือยัง (SELECT review)
+ *   2) ถ้าเคยและ rating/comment ไม่เปลี่ยน → คืน success + unchanged=true (idempotent)
+ *   3) ถ้าเปลี่ยนจริง: Flood guard (>= 5s จาก created_at เดิม) → ป้องกัน spam
+ *   4) UPDATE หรือ INSERT ตามสถานะ
+ *   5) Recalculate aggregate (AVG / COUNT) แล้วอัปเดตตาราง recipe
+ *   6) คืนรีวิวล่าสุด (รวม avatar)
+ * FLOOD GUARD: ใช้ timestamp created_at (อัปเดตเมื่อแก้) → หากแก้ภายใน 5 วินาที block (429)
+ * SECURITY: requireLogin, prepared statements, sanitizing comment
+ * PERFORMANCE: 3-4 query ต่อรอบ (select existing, write, aggregate, fetch latest) รับได้เพราะไม่ถี่
+ * TODO:
+ *   - พิจารณาเก็บ updated_at แยกจาก created_at เพื่อแสดงเวลาเริ่มโพสต์จริง
+ *   - เพิ่ม soft delete / history version ถ้าต้อง audit
+ * =====================================================================================
+ */
 
 /* ──────────── Dependencies ──────────── */
 require_once __DIR__ . '/inc/functions.php';
@@ -17,7 +35,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 /* ──────────── Input Retrieval ──────────── */
 $uid      = requireLogin();
 $recipeId = filter_input(INPUT_POST, 'recipe_id', FILTER_VALIDATE_INT) ?: 0;
-$comment  = sanitize($_POST['comment'] ?? '');      // ขอ comment ได้เป็นค่าว่าง
+$comment  = sanitize($_POST['comment'] ?? '');      // สามารถเป็นค่าว่าง: ใช้เฉพาะ rating
 $rating   = filter_input(INPUT_POST, 'rating', FILTER_VALIDATE_FLOAT) ?: 0;
 
 /* ──────────── Validation ──────────── */
@@ -37,13 +55,14 @@ try {
           FROM review
          WHERE recipe_id = ? AND user_id = ?
          LIMIT 1
-    ", [$recipeId, $uid]);
+    ", [$recipeId, $uid]); // รีวิวเดิม (ถ้ามี)
+    
 
     if ($review) {
         // เทียบว่า "มีการเปลี่ยนจริง" หรือไม่
         $sameRating  = (float)$review['rating'] === (float)$rating;
         $sameComment = trim((string)$review['comment']) === $comment;
-        $unchanged   = $sameRating && $sameComment;
+    $unchanged   = $sameRating && $sameComment; // ทั้งคะแนนและข้อความไม่เปลี่ยน
 
         if ($unchanged) {
             // ★ ไม่เปลี่ยนอะไรเลย → คืนข้อมูลเดิมเป็น success ทันที (idempotent)
@@ -58,16 +77,17 @@ try {
                   JOIN user u ON u.user_id = r.user_id
                  WHERE r.recipe_id = ? AND r.user_id = ?
                  LIMIT 1
-            ", [$recipeId, $uid]) ?: (object)[];
+            ", [$recipeId, $uid]) ?: (object)[]; // ดึงข้อมูลเต็มสำหรับ client sync
+    
             jsonOutput(['success' => true, 'data' => $c, 'unchanged' => true]);
         }
 
         /* ──────────── Flood Guard (≤ 5 วินาที เฉพาะกรณีมีการแก้จริง) ──────────── */
-        if (strtotime($review['created_at']) >= time() - 5) {
+    if (strtotime($review['created_at']) >= time() - 5) { // ยังไม่ถึง 5s → block
             jsonOutput(['success' => false, 'message' => 'รอสักครู่ก่อนแก้ไขรีวิวอีกครั้ง'], 429);
         }
 
-        // UPDATE เมื่อมีการเปลี่ยนจริง
+    // UPDATE เฉพาะเมื่อมีการเปลี่ยน (ผ่าน flood guard แล้ว)
         dbExec("
             UPDATE review
                SET rating = ?, comment = ?, created_at = NOW()
@@ -75,7 +95,7 @@ try {
         ", [$rating, $comment, $recipeId, $uid]);
 
     } else {
-        // INSERT ถ้าไม่มีรีวิวเดิม
+    // INSERT เมื่อไม่เคยมีรีวิว
         dbExec("
             INSERT INTO review (recipe_id, user_id, rating, comment, created_at)
             VALUES (?, ?, ?, ?, NOW())
@@ -86,7 +106,8 @@ try {
     $row = dbOne("
         SELECT AVG(rating) AS avg, COUNT(*) AS cnt
           FROM review WHERE recipe_id = ?
-    ", [$recipeId]);
+    ", [$recipeId]); // aggregate หลังเขียน
+    
 
     dbExec("
         UPDATE recipe 

@@ -1,5 +1,22 @@
 <?php
-// register.php — สมัครสมาชิก + ส่ง OTP ยืนยันอีเมล (ไทยล้วน • Mobile-friendly)
+/**
+ * register.php — สมัครสมาชิก + ส่ง OTP ยืนยันอีเมล
+ * =====================================================================
+ * ฟังก์ชันหลัก:
+ *   1) รับอีเมล / รหัสผ่าน / ยืนยันรหัสผ่าน / ชื่อโปรไฟล์
+ *   2) ตรวจความถูกต้อง (รูปแบบอีเมล, ความยาว, ความซับซ้อนรหัสผ่าน ฯลฯ)
+ *   3) เช็คอีเมลซ้ำ
+ *   4) สร้างผู้ใช้ (is_verified = 0) + บันทึก OTP + เวลาเริ่ม/หมดอายุ
+ *   5) ส่งอีเมลยืนยัน (ไม่ใส่ OTP ใน subject) — มี fallback SMTP พอร์ตอื่น
+ *   6) ตอบ JSON แจ้งให้ไปยืนยัน OTP
+ *
+ * การออกแบบความปลอดภัย:
+ *   - รหัสผ่าน hash ด้วย Argon2id (ถ้ามี) หรือ default (BCrypt)
+ *   - ไม่มีการ echo OTP ใน production (ใส่ otp_preview เฉพาะ dev)
+ *   - หากส่งเมลล้มเหลว ยังถือว่าสมัครสำเร็จ (ผู้ใช้กด "ขอรหัสใหม่" ภายหลังได้)
+ *   - ใช้ prepared statements ผ่าน dbExec()/dbVal()
+ * =====================================================================
+ */
 require_once __DIR__ . '/inc/mailer.php';
 require_once __DIR__ . '/bootstrap.php';
 require_once __DIR__ . '/inc/functions.php';   // ต้องมี jsonOutput(), sanitize()
@@ -9,11 +26,11 @@ require_once __DIR__ . '/inc/db.php';          // ต้องมี dbVal(), db
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\SMTP;
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') { // อนุญาตเฉพาะ POST
     jsonOutput(['success' => false, 'message' => 'วิธีเรียกไม่ถูกต้อง', 'errors' => ['Method not allowed']], 405);
 }
 
-/* ───── ค่าจาก ENV (มีค่าเริ่มต้นกรณีไม่ตั้ง) ───── */
+/* ───── 1) อ่านค่าคอนฟิกจาก ENV (มีค่าเริ่มต้นถ้าไม่ตั้ง) ───── */
 $brandName      = getenv('APP_BRAND_NAME') ?: 'Cooking Guide';
 $supportEmail   = getenv('SUPPORT_EMAIL')  ?: 'support@example.com';
 $appUrl         = rtrim(getenv('APP_URL') ?: (($_SERVER['HTTPS'] ?? 'off') === 'on' ? 'https://' : 'http://') . ($_SERVER['HTTP_HOST'] ?? 'localhost'), '/');
@@ -31,16 +48,16 @@ $smtpAllowSelf  = (string)(getenv('SMTP_ALLOW_SELF_SIGNED') ?: '0') === '1';
 
 $appEnv         = strtolower((string)getenv('APP_ENV'));
 
-/* ───── รับค่า ───── */
+/* ───── 2) รับค่าจากผู้ใช้ ───── */
 $email    = strtolower(trim(sanitize($_POST['email']            ?? '')));
 $pass     =                   $_POST['password']           ?? '';
 $confirm  =                   $_POST['confirm_password'] ?? '';
 $userName = trim(sanitize($_POST['username']           ?? ''));
 
-/* ───── Helper: นับไบต์ (UTF-8) ───── */
+/* ───── Helper ภายใน: นับจำนวนไบต์ UTF-8 ───── */
 $utf8ByteLen = static fn(string $s) => strlen($s);
 
-/* ───── ตรวจอินพุต ───── */
+/* ───── 3) ตรวจสอบความถูกต้องของอินพุต ───── */
 $errs = [];
 if ($email === '' || $pass === '' || $confirm === '' || $userName === '') {
     $errs[] = 'กรุณากรอกข้อมูลให้ครบทุกช่อง';
@@ -75,19 +92,19 @@ if ($errs) {
     jsonOutput(['success' => false, 'message' => 'ข้อมูลไม่ถูกต้อง', 'errors' => $errs], 400);
 }
 
-/* ───── เช็คอีเมลซ้ำ ───── */
+/* ───── 4) เช็คอีเมลซ้ำ ───── */
 $dup = dbVal("SELECT 1 FROM user WHERE email = ? LIMIT 1", [$email]);
 if ($dup) {
     jsonOutput(['success' => false, 'message' => 'อีเมลนี้ถูกใช้งานแล้ว', 'errors' => ['อีเมลนี้ถูกใช้งานแล้ว']], 409);
 }
 
-/* ───── เตรียม OTP/เวลา ───── */
+/* ───── 5) สร้าง OTP + เวลาหมดอายุ ───── */
 $maxVal    = (int)str_repeat('9', $otpLen);
 $otp       = str_pad((string)random_int(0, $maxVal), $otpLen, '0', STR_PAD_LEFT);
 $sentAt    = date('Y-m-d H:i:s');
 $expiresAt = date('Y-m-d H:i:s', strtotime("+{$otpExpMin} minutes"));
 
-/* ───── เขียนผู้ใช้ ───── */
+/* ───── 6) บันทึกผู้ใช้ลงฐานข้อมูล ───── */
 $algo = defined('PASSWORD_ARGON2ID') ? PASSWORD_ARGON2ID : PASSWORD_DEFAULT;
 $hash = password_hash($pass, $algo);
 
@@ -98,13 +115,13 @@ $ok = dbExec("
         (?, ?, ?, NOW(), 0, ?, ?, ?, 1)
 ", [$email, $hash, $userName, $otp, $sentAt, $expiresAt]);
 
-/* ───── เทมเพลตอีเมลใหม่ (Pastel Brown Minimal) ───── */
+/* ───── 7) สร้างเทมเพลตอีเมล (Pastel Brown Minimal) ───── */
 $tpl = buildOtpEmail($brandName, $otp, $otpExpMin, 'verify', $supportEmail, $appUrl);
 $subject = $tpl['subject'];
 $html    = $tpl['html'];
 $altText = $tpl['alt'];
 
-/* ───── ส่งอีเมล OTP ───── */
+/* ───── 8) ส่งอีเมล OTP (มี fallback พอร์ต) ───── */
 $emailSent = false;
 if ($ok) {
     try {
@@ -167,7 +184,7 @@ if ($ok) {
 }
 
 
-/* ───── ตอบกลับ FE ───── */
+/* ───── 9) ตอบกลับ Frontend ───── */
 if ($ok) {
     $resp = [
         'success'        => true,

@@ -1,5 +1,19 @@
 <?php
-// toggle_favorite.php — กดถูกใจ / เลิกถูกใจเมนู (idempotent + นับยอดล่าสุด)
+/**
+ * toggle_favorite.php — กดถูกใจ / เลิกถูกใจสูตรอาหาร (idempotent + นับยอดล่าสุด)
+ * =====================================================================
+ * โหมดการทำงาน:
+ *   A) Client ส่ง favorite=1 หรือ 0 → บังคับสถานะตรงนั้น (set explicit)
+ *   B) Client ไม่ส่ง favorite → toggle อัตโนมัติ (อ่านสถานะปัจจุบันแล้วกลับด้าน)
+ * ความปลอดภัย / ความถูกต้อง:
+ *   - requireLogin() บังคับผู้ใช้
+ *   - ใช้ Transaction ครอบ (BEGIN → insert/delete → count → update recipe → commit)
+ *   - INSERT IGNORE ป้องกัน duplicate key race (ถ้ามี unique(user_id, recipe_id))
+ *   - นับยอดจริงจากตาราง favorites แล้ว sync ไป recipe.favorite_count (ถ้ามีคอลัมน์นั้น)
+ * ผลตอบกลับ:
+ *   data: { recipe_id, is_favorited, favorite_count, total_user_favorites }
+ * =====================================================================
+ */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/json.php';
@@ -34,7 +48,7 @@ try {
         $pdo->beginTransaction();
     }
 
-    if ($favRaw === null) {
+    if ($favRaw === null) { // โหมด toggle อัตโนมัติ
         // โหมด toggle อัตโนมัติ (client ไม่ได้ส่ง favorite มา)
         $exists = dbVal('SELECT COUNT(*) FROM favorites WHERE user_id = ? AND recipe_id = ?', [$uid, $recipeId]) > 0;
         $fav = !$exists;
@@ -43,7 +57,7 @@ try {
         $fav = (string)$favRaw === '1' || (int)$favRaw === 1 || $favRaw === true;
     }
 
-    if ($fav) {
+    if ($fav) { // เพิ่ม
         // add if not exists
         dbExec('INSERT IGNORE INTO favorites (user_id, recipe_id) VALUES (?, ?)', [$uid, $recipeId]);
     } else {
@@ -53,7 +67,7 @@ try {
     // นับยอดล่าสุดจากตาราง favorites
     $cnt = (int) dbVal('SELECT COUNT(*) FROM favorites WHERE recipe_id = ?', [$recipeId]);
 
-    // อัปเดตตาราง recipe (ถ้ามีคอลัมน์ favorite_count)
+    // Sync ค่า favorite_count ใน recipe (ignore หาก schema ไม่มีคอลัมน์)
     // NOTE: ถ้าฐานข้อมูลคุณใช้ชื่อ table อื่น เช่น `recipes` ให้แก้ชื่อให้ตรง
     dbExec('UPDATE recipe SET favorite_count = ? WHERE recipe_id = ?', [$cnt, $recipeId]);
 

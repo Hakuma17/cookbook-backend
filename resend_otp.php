@@ -1,15 +1,27 @@
 <?php
-// resend_otp.php — ขอ OTP ซ้ำ (รองรับ purpose=verify|reset)
-// แก้ไขหลัก: require bootstrap.php และใช้ makeMailerFromEnv()
+/**
+ * resend_otp.php — ขอรหัส OTP ใหม่ (purpose = verify | reset)
+ * =====================================================================
+ * ฟังก์ชันหลัก:
+ *   - ใช้ร่วมได้ทั้งฟลว์ ยืนยันบัญชี (verify) และ ลืมรหัสผ่าน (reset)
+ *   - ปกป้อง Privacy: หากอีเมลไม่มีในระบบ ให้ตอบกลาง ๆ เสมอ
+ *   - บังคับคั่นเวลา (cooldown) และจำกัดจำนวนคำขอ พร้อม lock เมื่อเกิน
+ *   - ส่งอีเมลผ่าน makeMailerFromEnv() + buildOtpEmail()
+ *   - ไม่ใส่ OTP ใน subject
+ * ความปลอดภัย:
+ *   - ไม่แจ้งชัดเจนว่าอีเมลมีบัญชี เพื่อกัน enumeration
+ *   - มี rate limit + lock เพื่อลด bruteforce / spam
+ * =====================================================================
+ */
 
-require_once __DIR__ . '/bootstrap.php';   // ★ โหลด .env
+require_once __DIR__ . '/bootstrap.php';   // โหลด .env + autoload
 require_once __DIR__ . '/inc/functions.php';
 require_once __DIR__ . '/inc/db.php';
 require_once __DIR__ . '/inc/mailer.php';  // ★ ใช้ mailer กลาง
 
 use PHPMailer\PHPMailer\PHPMailer;
 
-/* ───── Config ───── */
+/* ───── 1) Config / ENV ───── */
 $OTP_LEN      = (int)(getenv('OTP_LEN')      ?: 6);
 $OTP_EXP_MIN  = (int)(getenv('OTP_EXP_MIN')  ?: 10);
 $COOLDOWN_SEC = (int)(getenv('COOLDOWN_SEC') ?: 60);
@@ -20,11 +32,11 @@ $brandName    = getenv('APP_BRAND_NAME') ?: 'Cooking Guide';
 $supportEmail = getenv('SUPPORT_EMAIL')  ?: 'support@example.com';
 $appUrl       = rtrim(getenv('APP_URL') ?: (($_SERVER['HTTPS'] ?? 'off') === 'on' ? 'https://' : 'http://') . ($_SERVER['HTTP_HOST'] ?? 'localhost'), '/');
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') { // อนุญาตเฉพาะ POST
     jsonOutput(['success' => false, 'message' => 'วิธีเรียกไม่ถูกต้อง'], 405);
 }
 
-/* ───── รับค่า ───── */
+/* ───── 2) รับค่า ───── */
 $email   = strtolower(trim(sanitize($_POST['email']   ?? '')));
 $purpose = strtolower(trim(sanitize($_POST['purpose'] ?? 'verify'))); // verify | reset (default=verify)
 
@@ -35,7 +47,7 @@ if (!in_array($purpose, ['verify', 'reset'], true)) {
     jsonOutput(['success' => false, 'message' => 'purpose ไม่ถูกต้อง (verify|reset)'], 400);
 }
 
-/* ───── หา user ───── */
+/* ───── 3) หา user (ถ้ามี) ───── */
 $u = dbOne("
     SELECT user_id, email, is_verified, otp_sent_at, request_attempts, request_lock_until
       FROM user
@@ -43,7 +55,7 @@ $u = dbOne("
      LIMIT 1
 ", [$email]);
 
-/* ───── Privacy ───── */
+/* ───── 4) Privacy ป้องกันเดาอีเมล ───── */
 if (!$u) {
     jsonOutput([
         'success'      => true,
@@ -66,7 +78,7 @@ if ($purpose === 'reset' && (int)$u['is_verified'] !== 1) {
     ], 200);
 }
 
-/* ───── Rate limiting ───── */
+/* ───── 5) Rate limiting & Lock ───── */
 if (!empty($u['request_lock_until']) && time() < strtotime($u['request_lock_until'])) {
     $wait = max(0, strtotime($u['request_lock_until']) - time());
     jsonOutput([
@@ -104,7 +116,7 @@ if ($elapsed < $COOLDOWN_SEC) {
     ], 429);
 }
 
-/* ───── ออก OTP แล้วบันทึก ───── */
+/* ───── 6) สร้าง OTP + บันทึกลงฐานข้อมูล ───── */
 $otp     = str_pad((string)random_int(0, (int)str_repeat('9', $OTP_LEN)), $OTP_LEN, '0', STR_PAD_LEFT);
 $sentAt  = date('Y-m-d H:i:s');
 $expires = date('Y-m-d H:i:s', strtotime('+'.$OTP_EXP_MIN.' minutes'));
@@ -117,14 +129,14 @@ dbExec("
      WHERE email = ?
 ", [$otp, $expires, $sentAt, $email]);
 
-/* ───── สร้างอีเมล (HTML + plain) ───── */
+/* ───── 7) สร้างอีเมล (HTML + plain) ───── */
 // Use shared pastel-brown template (no OTP in subject)
 $tpl      = buildOtpEmail($brandName, $otp, $OTP_EXP_MIN, $purpose, $supportEmail, $appUrl);
 $subject  = $tpl['subject'];
 $html     = $tpl['html'];
 $altText  = $tpl['alt'];
 
-/* ───── ส่งอีเมล ───── */
+/* ───── 8) ส่งอีเมล ───── */
 try {
     $m = makeMailerFromEnv();          // ★ ใช้ mailer กลาง
     $m->addAddress($email);

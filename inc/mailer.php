@@ -1,11 +1,29 @@
-
 <?php
-// inc/mailer.php
+/**
+ * inc/mailer.php
+ * =====================================================================
+ * รวมฟังก์ชันเกี่ยวกับการส่งอีเมล (PHPMailer)
+ *  - makeMailerFromEnv(): สร้างและตั้งค่า PHPMailer จากตัวแปรสภาพแวดล้อม
+ *  - buildOtpEmail(): เทมเพลตอีเมล OTP โทน Pastel Brown (ไม่มีรหัสใน subject)
+ *
+ * แนวคิดด้านความปลอดภัย / ความเหมาะสม:
+ *  - ไม่ใส่ OTP ใน subject (หัวข้อมักถูกแคช/preview ในระบบเมลหลายที่)
+ *  - กำหนด CharSet UTF-8 เพื่อรองรับภาษาไทยครบถ้วน
+ *  - รองรับการปรับ encryption อัตโนมัติตามพอร์ต (465 = SMTPS, อื่น ๆ = STARTTLS)
+ *  - เปิด debug เฉพาะเมื่อ SMTP_DEBUG=1 (เขียนลง error_log เท่านั้น)
+ *  - มี option อนุญาต self-signed (เฉพาะกรณี dev ทดสอบภายใน) ผ่าน SMTP_ALLOW_SELF_SIGNED=1
+ * =====================================================================
+ */
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\SMTP;
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
+// ---------------------------------------------------------------------
+// สร้าง Mailer กลางจากตัวแปรสภาพแวดล้อม
+// - ต้องตั้ง SMTP_HOST, SMTP_USER, SMTP_PASS อย่างน้อย (ถ้าเว้นจะ throw)
+// - ลบรอยช่องว่างในรหัสผ่าน (กัน copy/paste ที่มี space)
+// ---------------------------------------------------------------------
 function makeMailerFromEnv(): PHPMailer {
     $brand = getenv('APP_BRAND_NAME') ?: 'Cooking Guide';
     $host  = getenv('SMTP_HOST') ?: 'smtp.gmail.com';
@@ -19,7 +37,7 @@ function makeMailerFromEnv(): PHPMailer {
     $allowSelf = (string)(getenv('SMTP_ALLOW_SELF_SIGNED') ?: '0') === '1';
 
     if ($user === '' || $pass === '') {
-        throw new RuntimeException('SMTP not configured (user/pass empty).');
+        throw new RuntimeException('SMTP not configured (user/pass empty).'); // บังคับต้องตั้งค่าขั้นต่ำ
     }
 
     $mail = new PHPMailer(true);
@@ -30,7 +48,7 @@ function makeMailerFromEnv(): PHPMailer {
     $mail->Username   = $user;
     $mail->Password   = $pass;
 
-    // เลือก encryption ตามพอร์ต
+    // เลือก encryption ตามพอร์ต (465 = SMTPS / อื่นใช้ STARTTLS)
     if ($port === 465) {
         $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
     } else {
@@ -38,11 +56,11 @@ function makeMailerFromEnv(): PHPMailer {
     }
     $mail->Port = $port;
 
-    if ($debug === 1) {
+    if ($debug === 1) { // เปิดโหมด debug แบบ log
         $mail->SMTPDebug   = SMTP::DEBUG_SERVER;
         $mail->Debugoutput = function($str, $level) { error_log("[SMTP DEBUG] {$str}"); };
     }
-    if ($allowSelf) {
+    if ($allowSelf) {   // ใช้เฉพาะ dev/test เท่านั้น ไม่แนะนำ production
         $mail->SMTPOptions = [
             'ssl' => [
                 'verify_peer'       => false,
@@ -52,20 +70,25 @@ function makeMailerFromEnv(): PHPMailer {
         ];
     }
 
-    // แนะนำให้ setFrom เป็นบัญชีที่ login จริง เพื่อลดปัญหา DMARC
+    // setFrom = บัญชี SMTP เพื่อหลีกเลี่ยง DMARC reject
     $mail->setFrom($user, $brand);
 
     return $mail;
 }
 
 /**
- * Build a minimal pastel-brown themed OTP email (HTML + plain text) without leaking the code in the subject.
- * @param string $brandName  Brand / product name.
- * @param string $otp        OTP code (already generated, numeric or alphanumeric).
- * @param int    $expiryMin  Expiry in minutes (display only).
- * @param string $purpose    verify | reset (affects wording).
- * @param string $supportEmail Optional support contact.
- * @param string $appUrl       Optional site/app URL.
+ * เทมเพลตอีเมล OTP (HTML + Plain Text)
+ * -------------------------------------------------------------
+ * ไม่ใส่ OTP ใน subject เพื่อความปลอดภัย + ลดการ cache
+ * ปรับธีม Pastel Brown ให้ดูสะอาด และรองรับ Dark Mode ได้พอสมควร
+ * ส่งออกทั้งรูปแบบ HTML (rich) และ alt (plain)
+ *
+ * @param string $brandName   ชื่อแบรนด์
+ * @param string $otp         รหัส OTP (สร้างภายนอก/ผ่านการ validate แล้ว)
+ * @param int    $expiryMin   อายุรหัส (นาที) — แสดงผลอย่างเดียว ไม่ได้ตรวจในฟังก์ชันนี้
+ * @param string $purpose     verify|reset เพื่อปรับข้อความ
+ * @param string $supportEmail ช่องทางติดต่อ (optional)
+ * @param string $appUrl      URL แอป/เว็บ (optional)
  * @return array{subject:string,html:string,alt:string,preheader:string}
  */
 function buildOtpEmail(string $brandName, string $otp, int $expiryMin, string $purpose = 'verify', string $supportEmail = '', string $appUrl = ''): array {
@@ -96,7 +119,7 @@ function buildOtpEmail(string $brandName, string $otp, int $expiryMin, string $p
                 ? "รหัสสำหรับรีเซ็ตรหัสผ่าน (หมดอายุใน {$expiryMin} นาที)"
                 : "รหัสสำหรับยืนยันอีเมล (หมดอายุใน {$expiryMin} นาที)";
 
-    // Base palette (pastel browns) — tuned for better dark-mode inversion
+    // โทนสีหลัก (pastel browns) — เลือกให้ invert ใน dark mode แล้วอ่านได้ยังดี
     $bgPage     = '#f8f5f2';    // becomes dark grey on Gmail dark mode
     $cardBg     = '#fffaf6';
     $accent     = '#a6733d';    // brand accent (brown)
@@ -162,7 +185,7 @@ function buildOtpEmail(string $brandName, string $otp, int $expiryMin, string $p
 </html>
 HTML;
 
-        $contactLines = '';
+    $contactLines = ''; // รวบบรรทัดติดต่อไว้ใน plain text
         if ($supportEmail) $contactLines .= "ติดต่อ: {$supportEmail}\n";
         if ($appUrl)       $contactLines .= "เว็บไซต์: {$appUrl}\n";
 

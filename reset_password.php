@@ -1,18 +1,31 @@
 <?php
-// reset_password.php — ส่ง OTP ไปอีเมลเพื่อรีเซ็ตรหัสผ่าน (ไทยล้วน • Mobile-friendly)
-// เป้าหมาย:
-// - โหลด .env ผ่าน bootstrap.php (เพื่อให้ getenv() ได้ค่า SMTP_* ถูกต้อง)
-// - ใช้ inc/mailer.php → makeMailerFromEnv() (ลบรอยฮาร์ดโค้ด, จัดการช่องว่างในรหัส Gmail ให้อัตโนมัติ)
-// - คงนโยบาย privacy: ถ้าอีเมลไม่พบ ให้ตอบกลาง ๆ เหมือนเดิม
+/**
+ * reset_password.php — ขอ OTP เพื่อรีเซ็ตรหัสผ่าน
+ * =====================================================================
+ * ฟังก์ชัน: ออก OTP (purpose = reset) + ส่งอีเมล โดยไม่บอกว่าอีเมลมีบัญชีจริงหรือไม่
+ * โครงสร้างขั้นตอน:
+ *   1) ตรวจ method
+ *   2) รับ email + validate
+ *   3) Privacy: หากไม่พบ user → ตอบกลาง ๆ
+ *   4) ตรวจ rate limit (cooldown + จำนวนครั้ง + lock)
+ *   5) สร้าง OTP + บันทึก (เพิ่ม request_attempts)
+ *   6) สร้างเทมเพลต Pastel Brown (purpose=reset)
+ *   7) ส่งอีเมล (หากล้มเหลว: ยังตอบกลาง ๆ เพื่อไม่เผยข้อมูล)
+ * ความปลอดภัย:
+ *   - ไม่ระบุชัดว่ามีบัญชีหรือไม่
+ *   - จำกัดความถี่ + lock ลดสแปม/เดารหัส
+ *   - ไม่ใส่ OTP ใน subject
+ * =====================================================================
+ */
 
-require_once __DIR__ . '/bootstrap.php';        // ★ โหลด autoload + .env (มี fallback)
+require_once __DIR__ . '/bootstrap.php';        // โหลด autoload + .env (รองรับ fallback)
 require_once __DIR__ . '/inc/functions.php';    // sanitize(), jsonOutput(), db helpers
 require_once __DIR__ . '/inc/db.php';
 require_once __DIR__ . '/inc/mailer.php';       // ★ ใช้ makeMailerFromEnv()
 
 use PHPMailer\PHPMailer\PHPMailer;
 
-/* ───── Config (อ่านได้จาก .env ด้วย ถ้าอยาก override) ───── */
+/* ───── 1) Config (อ่านจาก .env) ───── */
 $OTP_LEN      = (int)(getenv('OTP_LEN')      ?: 6);
 $OTP_EXP_MIN  = (int)(getenv('OTP_EXP_MIN')  ?: 10);
 $COOLDOWN_SEC = (int)(getenv('COOLDOWN_SEC') ?: 60);
@@ -26,18 +39,18 @@ $appUrl       = rtrim(
     '/'
 );
 
-/* ───── Method Check ───── */
+/* ───── 2) Method Check ───── */
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonOutput(['success' => false, 'message' => 'วิธีเรียกไม่ถูกต้อง'], 405);
 }
 
-/* ───── Validate Email ───── */
+/* ───── 3) รับและตรวจอีเมล ───── */
 $email = strtolower(trim(sanitize($_POST['email'] ?? '')));
 if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
     jsonOutput(['success' => false, 'message' => 'รูปแบบอีเมลไม่ถูกต้อง'], 400);
 }
 
-/* ───── Email Exists? (ตอบแบบไม่เปิดเผยข้อมูล) ───── */
+/* ───── 4) หา user + Privacy ───── */
 $user = dbOne('SELECT user_id, otp_sent_at, request_attempts, request_lock_until FROM user WHERE email = ? LIMIT 1', [$email]);
 if (!$user) {
     // ตอบกลาง ๆ เสมอ เพื่อลดการเดาอีเมล
@@ -49,7 +62,7 @@ if (!$user) {
     ], 200);
 }
 
-/* ───── Rate Limiting ───── */
+/* ───── 5) Rate Limiting / Lock ───── */
 if (!empty($user['request_lock_until']) && time() < strtotime($user['request_lock_until'])) {
     $wait = strtotime($user['request_lock_until']) - time();
     jsonOutput(['success' => false, 'message' => "ขอรหัสถี่เกินไป กรุณารออีก {$wait} วินาที"], 429);
@@ -66,7 +79,7 @@ if (!empty($user['otp_sent_at']) && (time() - strtotime($user['otp_sent_at'])) <
     jsonOutput(['success' => false, 'message' => "กรุณารออีก {$wait} วินาที"], 429);
 }
 
-/* ───── Generate & Save OTP ───── */
+/* ───── 6) ออก OTP + บันทึก ───── */
 $otp     = str_pad((string)random_int(0, (int)str_repeat('9', $OTP_LEN)), $OTP_LEN, '0', STR_PAD_LEFT);
 $sentAt  = date('Y-m-d H:i:s');
 $expires = date('Y-m-d H:i:s', strtotime('+'.$OTP_EXP_MIN.' minutes'));
@@ -79,13 +92,13 @@ dbExec("
      WHERE email = ?
 ", [$otp, $expires, $sentAt, $email]);
 
-/* ───── Prepare Email (Pastel Brown Minimal Template) ───── */
+/* ───── 7) สร้างเทมเพลตอีเมล (Pastel Brown purpose=reset) ───── */
 $tpl      = buildOtpEmail($brandName, $otp, $OTP_EXP_MIN, 'reset', $supportEmail, $appUrl);
 $subject  = $tpl['subject'];
 $html     = $tpl['html'];
 $altText  = $tpl['alt'];
 
-/* ───── Send Email ───── */
+/* ───── 8) ส่งอีเมล ───── */
 try {
     // ★ ใช้ mailer กลาง (อ่าน SMTP_* จาก .env แล้วลบช่องว่างในรหัส Gmail ให้อัตโนมัติ)
     $mail = makeMailerFromEnv();
