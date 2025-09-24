@@ -1,16 +1,28 @@
 <?php
 /**
- * bootstrap.php — โหลด Composer autoload + .env (แบบมี fallback)
- * ----------------------------------------------------------------
- * ใช้กับสภาพแวดล้อมที่อาจยังไม่ได้ติดตั้ง vlucas/phpdotenv
- * - ถ้ามี Dotenv: ใช้ Dotenv โหลด .env
- * - ถ้าไม่มี Dotenv: ใช้ตัวอ่าน .env แบบง่าย ๆ (fallback) เพื่อให้ getenv() ใช้ได้
- * หมายเหตุ: ต้องเซฟไฟล์เป็น UTF-8 (ไม่มี BOM) และห้ามมีเอาต์พุตก่อน header ใด ๆ
+ * bootstrap.php
+ * ====================================================================
+ * หน้าที่หลัก:
+ *   1) โหลด Composer autoload (ถ้ามี vendor/autoload.php)
+ *   2) โหลดค่าตัวแปรสภาพแวดล้อม (.env) — รองรับ 2 โหมด:
+ *        - ปกติ: ใช้ไลบรารี vlucas/phpdotenv (ถ้ามี)
+ *        - fallback: พาร์เซไฟล์ .env แบบง่าย ๆ เอง เมื่อยังไม่ได้ติดตั้งไลบรารี
+ *   3) ตั้ง timezone และ error reporting ตาม APP_ENV (dev vs production)
+ *
+ * แนวทางความปลอดภัย / ความเข้ากันได้:
+ *   - ไม่ส่งเอาต์พุตใด ๆ ก่อน header (กัน header already sent)
+ *   - Parser fallback เน้นอ่าน KEY=VALUE พื้นฐาน (ไม่ซับซ้อนเรื่อง nested ${VAR})
+ *   - เก็บค่าเข้า putenv(), $_ENV, $_SERVER ให้ script อื่นเข้าถึงแบบเดียวกัน
+ *
+ * หมายเหตุ:
+ *   - บันทึกไฟล์เป็น UTF-8 (ไม่มี BOM)
+ *   - หากต้องขยายความสามารถ .env (เช่น variable expansion) แนะนำติดตั้ง phpdotenv เต็ม ๆ
+ * ====================================================================
  */
 
 declare(strict_types=1);
 
-// ───────────────────────── Composer autoload ─────────────────────────
+// ───────────────────────── 1. COMPOSER AUTOLOAD ─────────────────────────
 $autoloadPath = __DIR__ . '/vendor/autoload.php';
 if (is_file($autoloadPath)) {
     require_once $autoloadPath;
@@ -18,7 +30,7 @@ if (is_file($autoloadPath)) {
     error_log('[bootstrap] vendor/autoload.php not found at: ' . $autoloadPath);
 }
 
-// ───────────────────────── Helper: set env var ───────────────────────
+// ───────────────────────── 2. HELPER ตั้งค่า ENV ───────────────────────
 /**
  * ตั้งค่า env ทั้ง putenv(), $_ENV, $_SERVER ให้สอดคล้องกัน
  */
@@ -31,11 +43,10 @@ function _env_set(string $key, string $val): void {
 }
 
 /**
- * Fallback loader แบบง่าย ๆ:
- * - รองรับบรรทัดรูปแบบ KEY=VALUE
- * - ตัดคอมเมนต์ด้วย # เฉพาะเมื่อ # อยู่นอกเครื่องหมายคำพูด
- * - รองรับค่าใน "..." หรือ '...'
- * - ไม่ทำ variable expansion ซับซ้อน (เช่น ${FOO})
+ * Fallback loader แบบง่าย:
+ *   - KEY=VALUE (ตัด # เมื่ออยู่นอก quote)
+ *   - รองรับค่าที่ครอบด้วย '...' หรือ "..." (double quote แกะ \n, \t, \r ได้)
+ *   - ไม่รองรับการอ้างอิงตัวแปรซ้อน (${FOO}) เพื่อลดความซับซ้อน
  */
 function _load_env_fallback(string $envFile): void {
     if (!is_file($envFile) || !is_readable($envFile)) {
@@ -100,11 +111,11 @@ function _load_env_fallback(string $envFile): void {
     }
 }
 
-// ───────────────────────── โหลด .env ────────────────────────────────
+// ───────────────────────── 3. โหลดไฟล์ .env ─────────────────────────────
 $envDir  = __DIR__;
 $envFile = $envDir . '/.env';
 
-// กรณีมีไลบรารี Dotenv
+// 3.1 กรณีมีไลบรารี Dotenv
 if (class_exists(\Dotenv\Dotenv::class)) {
     try {
         // บางเวอร์ชันมี safeLoad() ถ้าไม่มีให้ใช้ load() แล้วจับ Throwable
@@ -120,18 +131,18 @@ if (class_exists(\Dotenv\Dotenv::class)) {
         _load_env_fallback($envFile);
     }
 } else {
-    // ไม่มีแพ็กเกจ vlucas/phpdotenv → ใช้ fallback
+    // 3.2 ไม่มีแพ็กเกจ vlucas/phpdotenv → ใช้ fallback parsing ธรรมดา
     error_log('[bootstrap] Dotenv class not found, using fallback parser for .env');
     _load_env_fallback($envFile);
 }
 
-// ───────────────────────── ค่าตั้งค่าเพิ่มเติม (ออปชัน) ─────────────────────────
+// ───────────────────────── 4. ค่าตั้งค่าเพิ่มเติม (timezone / error) ──────────────
 // ตั้ง timezone ตามที่ต้องการ (ค่าเริ่มต้น Asia/Bangkok ถ้าไม่ได้ตั้ง)
 if (!ini_get('date.timezone')) {
     date_default_timezone_set(getenv('APP_TZ') ?: 'Asia/Bangkok');
 }
 
-// โดยทั่วไปไม่แนะนำให้เปิด error display ใน production
+// โดยทั่วไปไม่แนะนำให้เปิด error display ใน production (กันข้อมูลภายในรั่ว)
 if (strtolower((string)(getenv('APP_ENV') ?: 'production')) !== 'production') {
     // dev: แสดง error
     ini_set('display_errors', '1');
@@ -144,4 +155,4 @@ if (strtolower((string)(getenv('APP_ENV') ?: 'production')) !== 'production') {
     error_reporting(E_ALL & ~E_NOTICE & ~E_STRICT & ~E_DEPRECATED);
 }
 
-// *** จบไฟล์: ไม่ปิด PHP tag เพื่อกัน whitespace หลุดออก ***
+// *** END OF FILE: ไม่มีปิดแท็ก PHP เพื่อป้องกัน whitespace/output แทรก ***
