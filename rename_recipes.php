@@ -1,6 +1,12 @@
 <?php
 // rename_recipes.php
-// รันด้วย: php rename_recipes.php
+// รันด้วย: php rename_recipes.php (CLI เท่านั้น)
+
+if (php_sapi_name() !== 'cli') {
+    http_response_code(403);
+    echo 'Forbidden';
+    exit(1);
+}
 
 // 1) โหลดการตั้งค่า DB และฟังก์ชันเสริม
 require_once __DIR__ . '/inc/config.php';
