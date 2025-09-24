@@ -1,5 +1,20 @@
 <?php
-// get_user_favorites.php — คืนรายการสูตรโปรดของผู้ใช้ (รองรับ only_ids=1)
+/**
+ * get_user_favorites.php — รายการสูตรโปรดของผู้ใช้
+ * =====================================================================
+ * โหมด:
+ *   - ปกติ: คืนรายละเอียด recipe เต็ม (ชื่อ, รูป, คะแนน, review_count, favorite_count, has_allergy)
+ *   - ?only_ids=1: คืนเฉพาะอาร์เรย์ [id,...] (เบา เหมาะ sync เร็ว / badge)
+ * คุณลักษณะ:
+ *   - กรองโดย user_id (ต้องล็อกอิน)
+ *   - has_allergy: ตรวจแบบ “กลุ่ม” (เทียบ newcatagory) ลด false‑negative
+ *   - คืนทั้ง id และ recipe_id เพื่อความเข้ากันได้หลายเวอร์ชันของแอป
+ * ประสิทธิภาพ:
+ *   - มี subquery count review / favorites ต่อ recipe; ถ้าตารางใหญ่ควรพิจารณา materialized fields หรือ join แยก
+ * ความปลอดภัย:
+ *   - requireLogin() → ห้ามเข้าถึงของผู้อื่น
+ * =====================================================================
+ */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
@@ -7,7 +22,7 @@ require_once __DIR__ . '/inc/db.php'; // ← helper PDO (dbAll, dbVal, ...)
 
 // NOTE: ไม่ลบของเดิม ใส่เป็นคอมเมนต์ไว้ในส่วนที่เปลี่ยน
 
-if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+if ($_SERVER['REQUEST_METHOD'] !== 'GET') { // อนุญาตเฉพาะ GET
     jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
 }
 
@@ -16,10 +31,10 @@ try {
     $uid = requireLogin();
 
     /* 2) โหมดเบา: ?only_ids=1 → ส่งกลับอาร์เรย์ id ล้วน */
-    $onlyIds = (isset($_GET['only_ids']) && $_GET['only_ids'] === '1');
+    $onlyIds = (isset($_GET['only_ids']) && $_GET['only_ids'] === '1'); // โหมดเบา
     if ($onlyIds) {
         // ใช้คอลัมน์เดียวให้เบาที่สุด
-        $rows = dbAll("SELECT recipe_id AS id FROM favorites WHERE user_id = ?", [$uid]);
+    $rows = dbAll("SELECT recipe_id AS id FROM favorites WHERE user_id = ?", [$uid]); // ดึงเฉพาะ id
         $ids  = [];
         if (is_array($rows)) {
             // map เป็น int ปลอดภัย
@@ -40,8 +55,6 @@ try {
         SELECT
             r.recipe_id,
             r.name,
-            r.image_path,
-            r.prep_time,
             r.average_rating,
             -- นับจำนวนรีวิว
             (SELECT COUNT(*) FROM review  c WHERE c.recipe_id = r.recipe_id) AS review_count,
@@ -68,19 +81,20 @@ try {
         */
 
         // [NEW] วิธีใหม่: เช็คแพ้แบบ “กลุ่ม” เทียบ newcatagory
-        $hasAllergy = dbVal("
-            SELECT COUNT(*)
-            FROM recipe_ingredient ri
-            JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
-            WHERE ri.recipe_id = ?
-              AND EXISTS (
-                SELECT 1
-                FROM allergyinfo a
-                JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
-                WHERE a.user_id = ?
-                  AND TRIM(ia.newcatagory) = TRIM(i.newcatagory)
-              )
-        ", [$r['recipe_id'], $uid]) > 0;
+                    // [NEW] วิธีใหม่: เช็คแพ้แบบ “กลุ่ม” เทียบ newcatagory (ใช้ EXISTS บน newcatagory เพื่อลดซ้ำ)
+                    $hasAllergy = dbVal("
+                            SELECT COUNT(*)
+                            FROM recipe_ingredient ri
+                            JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
+                            WHERE ri.recipe_id = ?
+                                AND EXISTS (
+                                    SELECT 1
+                                    FROM allergyinfo a
+                                    JOIN ingredients ia ON ia.ingredient_id = a.ingredient_id
+                                    WHERE a.user_id = ?
+                                        AND TRIM(ia.newcatagory) = TRIM(i.newcatagory)
+                                )
+                    ", [$r['recipe_id'], $uid]) > 0; // เช็คแพ้แบบ “กลุ่ม”
 
         // สร้าง URL รูป (fallback ถ้าไม่มี)
         $img = !empty($r['image_path'])
@@ -92,7 +106,7 @@ try {
         $favCnt    = isset($r['favorite_count']) ? (int)$r['favorite_count'] : 0;
 
         // คืนทั้ง id และ recipe_id เพื่อความเข้ากันได้กับแอปหลายเวอร์ชัน
-        $item = [
+    $item = [ // โครงสร้างข้อมูลที่ FE คาดหวัง
             'id'              => (int)$r['recipe_id'],
             'recipe_id'       => (int)$r['recipe_id'],
             'name'            => (string)$r['name'],
