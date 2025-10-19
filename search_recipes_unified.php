@@ -101,7 +101,8 @@ try {
     $qNoSpace = preg_replace('/\s+/u', '', $rawQ);
 
     $catId  = isset($p['cat_id']) && $p['cat_id'] !== '' ? (int)$p['cat_id'] : null;
-    $sort   = strtolower(trim($p['sort'] ?? 'latest'));
+    // Default sort for Search page should be name_asc
+    $sort   = strtolower(trim($p['sort'] ?? 'name_asc'));
     $page   = max(1, (int)($p['page'] ?? 1));
     $limit  = max(1, min(50, (int)($p['limit'] ?? 26)));
     $offset = ($page - 1) * $limit;
@@ -471,20 +472,25 @@ try {
         ------------------------------------------------------------------------*/
     // เก็บ SQL ก่อนใส่ ORDER BY/LIMIT เอาไว้ใช้คำนวนจำนวนผลลัพธ์ทั้งหมดของเงื่อนไขปัจจุบัน
     $sqlNoPaging = $sql;
+    // Exact spec for order mapping
     $orderBy = match ($sort) {
-        'name_asc'    => 'r.name ASC',
-        'popular'     => 'favorite_count DESC',
-        'trending'    => 'r.created_at DESC, favorite_count DESC',
-        'recommended' => 'r.average_rating DESC, review_count DESC',
-        default       => 'r.created_at DESC',
+        // latest: created_at DESC, recipe_id DESC
+        'latest'      => 'r.created_at DESC, r.recipe_id DESC',
+        // name_asc (default): name ASC, recipe_id ASC
+        'name_asc'    => 'r.name ASC, r.recipe_id ASC',
+        // popular: average_rating DESC, review_count DESC, favorite_count DESC, created_at DESC, recipe_id DESC
+        'popular'     => 'r.average_rating DESC, review_count DESC, favorite_count DESC, r.created_at DESC, r.recipe_id DESC',
+        // keep legacy options deterministic
+        'trending'    => 'r.created_at DESC, favorite_count DESC, r.recipe_id DESC',
+        'recommended' => 'r.average_rating DESC, review_count DESC, r.created_at DESC, r.recipe_id DESC',
+        default       => 'r.name ASC, r.recipe_id ASC',
     };
-    $sql .= "ORDER BY
-        name_rank       DESC,
-        $orderBy,
-        ing_rank        DESC,
-        ing_match_cnt   DESC,
-        r.recipe_id     DESC
-      LIMIT $limit OFFSET $offset";
+
+    // For defined sorts, don't let name_rank push items above orderBy; keep name_rank only when not in spec sorts
+    $useNameRank = ($rawQ !== '') && !in_array($sort, ['latest','name_asc','popular'], true);
+    $nameRankClause = $useNameRank ? "name_rank DESC,\n        " : '';
+
+    $sql .= "ORDER BY\n        {$nameRankClause}$orderBy,\n        ing_rank        DESC,\n        ing_match_cnt   DESC\n      LIMIT $limit OFFSET $offset";
 
      /* ───────────────────────── 9) PLACEHOLDER COUNT SAFETY ────────────────
          ป้องกัน programmer error: ถ้า ? ใน SQL ไม่เท่ากับจำนวน $params → throw

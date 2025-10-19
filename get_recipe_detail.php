@@ -14,40 +14,29 @@
  *       steps: [{ step_number, description }...],
  *       nutrition: { calories, protein, fat, carbs },
  *       is_favorited (bool), user_rating (int|null), current_servings (int), has_allergy (bool),
- *       comments: [{ user_id, user_name, path_imgProfile, rating, comment, created_at, avatar_url, is_mine }...],
- *       categories: [category_name,...]
+ *       categories: [category_name,...],
+ *       comments_url: string   // 🔁 ดึงคอมเมนต์จาก endpoint get_comments.php (เลิกคืน comments ตรงนี้)
  *     }
  *   }
  *   กรณีไม่พบ → 404 { success:false, message }
  *
  * ALLERGY CHECK:
  *   - ใช้ EXISTS เปรียบเทียบ newcatagory (กลุ่ม) ระหว่างส่วนผสมในสูตร กับรายการแพ้ของผู้ใช้
- *   - เหตุผล: ป้องกันกรณีผู้ใช้แพ้กลุ่มแต่ไม่ได้ลงรายการ ingredient id ครบทุกตัว
  *
  * NUTRITION AGGREGATION:
  *   - สูตรรวม: sum(nutrient_per100g * grams_actual / 100)
- *   - ไม่มีการ normalize ต่อหนึ่งหน่วยเสิร์ฟ ณ ตอนนี้ (client สามารถหารด้วย current_servings ได้เอง)
  *
  * PERFORMANCE NOTES:
- *   - หลาย subquery/aggregation (ingredients, steps, reviews, nutrition) → ใช้ 4-5 query แยกง่ายต่อ caching รายส่วน
- *   - อาจใช้ caching (Redis) สำหรับ guest หรือ TTL สั้นสำหรับ popular recipes
- *   - ดัชนีแนะนำ: review(recipe_id,user_id), favorites(recipe_id,user_id), cart(recipe_id,user_id), step(recipe_id), recipe_ingredient(recipe_id)
+ *   - ลดงานซ้ำ: ไม่ JOIN review ที่นี่ ให้ FE ไปเรียก get_comments.php เอง
  *
  * SECURITY:
- *   - READ only; ป้องกัน method mismatch
- *   - ใช้โหมด prepared (dbOne/dbAll/dbVal) → กัน SQL injection
- *   - ไม่เผยแพร่ internal path (รูปใช้ basename เท่านั้น)
- *
- * EXTENSION IDEAS / TODO:
- *   - เพิ่มฟิลด์ allergy_groups / allergy_names เหมือน endpoints listing (ตอนนี้คืน has_allergy อย่างเดียว)
- *   - ใส่ cache ETag/If-None-Match เพื่อลด bandwidth
- *   - รองรับการ scale serving ปรับสูตร (คำนวณ ingredients ปรับตาม current_servings)
+ *   - READ only; ใช้ prepared statements
  * =====================================================================================
  */
 
 require_once __DIR__ . '/inc/config.php';
 require_once __DIR__ . '/inc/functions.php';
-require_once __DIR__ . '/inc/db.php'; // เพิ่ม helper
+require_once __DIR__ . '/inc/db.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     jsonOutput(['success' => false, 'message' => 'Method not allowed'], 405);
@@ -75,7 +64,7 @@ try {
     }
 
     /* base image */
-    $baseRec = getBaseUrl() . '/uploads/recipes';
+    $baseRec = rtrim(getBaseUrl(), '/') . '/uploads/recipes';
     $file    = $row['image_path'] ?: 'default_recipe.png';
     $row['image_urls'] = ["{$baseRec}/" . basename($file)];
 
@@ -116,7 +105,7 @@ try {
         'carbs'    => round((float)($nut['carb'] ?? 0), 1),
     ];
 
-    /** 5) ข้อมูลเฉพาะผู้ใช้ ***************************************************/
+    /** 5) ข้อมูลเฉพาะผู้ใช้ **************************************************/
     $uid = getLoggedInUserId();
     $row += [
         'is_favorited'     => false,
@@ -141,18 +130,9 @@ try {
             $row['current_servings'] = (int)$sv;
         }
 
-        /* [OLD] วิธีเดิม: เทียบ ingredient_id ตรง ๆ (คงไว้เป็นคอมเมนต์)
+        // [NEW] เช็กแพ้อาหารแบบกลุ่ม (newcatagory)
         $row['has_allergy'] = dbVal("
-            SELECT COUNT(*) FROM recipe_ingredient
-            WHERE recipe_id = ? AND ingredient_id IN (
-                SELECT ingredient_id FROM allergyinfo WHERE user_id = ?
-            )
-        ", [$rid, $uid]) > 0;
-        */
-
-        // [NEW] ขยายเป็น “ทั้งกลุ่ม” โดยเทียบ newcatagory ระหว่างส่วนผสมกับสิ่งที่ผู้ใช้แพ้
-        $row['has_allergy'] = dbVal("
-            SELECT COUNT(*) 
+            SELECT COUNT(*)
             FROM recipe_ingredient ri
             JOIN ingredients i ON i.ingredient_id = ri.ingredient_id
             WHERE ri.recipe_id = ?
@@ -167,23 +147,10 @@ try {
     }
 
     /** 6) ความคิดเห็น *********************************************************/
-    $baseProf = getBaseUrl() . '/uploads/profiles';
-    $comments = dbAll("
-        SELECT r.user_id, u.profile_name AS user_name, u.path_imgProfile,
-               r.rating, r.comment, r.created_at
-        FROM review r
-        JOIN user u ON u.user_id = r.user_id
-        WHERE r.recipe_id = ?
-        ORDER BY r.created_at DESC
-    ", [$rid]) ?: [];
-
-    foreach ($comments as &$c) {
-        $pf = $c['path_imgProfile'] ?: 'default_avatar.png';
-        $c['avatar_url'] = "{$baseProf}/" . basename($pf);
-        $c['is_mine']    = ($uid && $c['user_id'] == $uid) ? 1 : 0;
-    }
-    unset($c);
-    $row['comments'] = $comments;
+    // 🔁 เลิกคิวรีรีวิวตรงนี้เพื่อลดการซ้ำซ้อนกับ get_comments.php
+    // ให้ FE เรียกคอมเมนต์ผ่าน endpoint กลางแทน:
+    $row['comments_url'] = rtrim(getBaseUrl(), '/') . '/get_comments.php?id=' . urlencode((string)$rid);
+    // หมายเหตุ: ถ้าต้องการ “คงรูปแบบเดิม” สามารถให้ FE เรียก comments_url แล้ว merge data เอง
 
     /** 7) หมวดหมู่ ***********************************************************/
     $row['categories'] = dbAll("

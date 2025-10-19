@@ -38,7 +38,8 @@ try {
     $p        = ($_SERVER['REQUEST_METHOD'] === 'POST') ? $_POST : $_GET;
     $q        = sanitize($p['q'] ?? '');
     $qNoSpc   = preg_replace('/\s+/u', '', $q);
-    $sort     = strtolower(trim($p['sort'] ?? 'latest'));
+  // Default sort for Search should be name_asc
+  $sort     = strtolower(trim($p['sort'] ?? 'name_asc'));
     $catId    = isset($p['cat_id']) && $p['cat_id'] !== '' ? (int)$p['cat_id'] : null;
     $page     = max(1, (int)($p['page']  ?? 1));
     $limit    = max(1, min(50, (int)($p['limit'] ?? 26)));
@@ -282,21 +283,29 @@ try {
         $paramsWhere[] = $g;
     }
 
-  /* ───────── ORDER + LIMIT (เรียงโดย name_rank ก่อน ถ้ามี) ───────── */
+  /* ───────── ORDER + LIMIT (ตามสเปก) ───────── */
   $orderTrail   = match ($sort) {
-    'name_asc'    => 'r.name ASC',
-    'popular'     => 'favorite_count DESC',
-    'trending'    => 'r.created_at DESC, favorite_count DESC',
-    'recommended' => 'r.average_rating DESC, review_count DESC',
-    default       => 'r.created_at DESC',
+    // latest: created_at DESC, recipe_id DESC
+    'latest'      => 'r.created_at DESC, r.recipe_id DESC',
+    // name_asc (default): name ASC, recipe_id ASC
+    'name_asc'    => 'r.name ASC, r.recipe_id ASC',
+    // popular: average_rating DESC, review_count DESC, favorite_count DESC, created_at DESC, recipe_id DESC
+    'popular'     => 'r.average_rating DESC, review_count DESC, favorite_count DESC, r.created_at DESC, r.recipe_id DESC',
+    // keep legacy options if used elsewhere, add tie-breakers to be deterministic
+    'trending'    => 'r.created_at DESC, favorite_count DESC, r.recipe_id DESC',
+    'recommended' => 'r.average_rating DESC, review_count DESC, r.created_at DESC, r.recipe_id DESC',
+    default       => 'r.name ASC, r.recipe_id ASC',
   };
-    $orderNameRank = $qLen ? 'name_rank DESC,' : '';
+
+    // Do not let name_rank affect the defined sorts (latest/name_asc/popular)
+    $useNameRank = $qLen && !in_array($sort, ['latest','name_asc','popular'], true);
+    $orderPrefix = $useNameRank ? 'name_rank DESC, ' : '';
 
     $sqlNoPaging = $sql . "
-      ORDER BY {$orderNameRank} {$orderTrail}";
+      ORDER BY {$orderPrefix}{$orderTrail}";
 
     $sql .= "
-      ORDER BY {$orderNameRank} {$orderTrail}
+      ORDER BY {$orderPrefix}{$orderTrail}
       LIMIT ? OFFSET ?";
 
   $paramsNoPaging = array_merge($paramsSelect, $paramsNameRank, $paramsWhere);
@@ -344,7 +353,7 @@ try {
               {$select}
                 FROM recipe r
                WHERE {$likeConds}
-               ORDER BY r.created_at DESC
+               ORDER BY r.created_at DESC, r.recipe_id DESC
                LIMIT ? OFFSET ?";
 
             $paramsFbFinal = array_merge($paramsSelect, $paramsFb, [$limit, $offset]);
@@ -372,7 +381,7 @@ try {
                 FROM recipe r
                 JOIN recipe_ingredient ri ON ri.recipe_id = r.recipe_id
                WHERE ri.ingredient_id IN ($marksFb)
-               ORDER BY r.created_at DESC
+               ORDER BY r.created_at DESC, r.recipe_id DESC
                LIMIT ? OFFSET ?";
 
             $paramsFbFinal = array_merge($paramsSelect, $ingFbIds, [$limit, $offset]);

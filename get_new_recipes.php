@@ -123,7 +123,7 @@ try {
         LEFT JOIN review            rv ON rv.recipe_id  = r.recipe_id
         LEFT JOIN recipe_ingredient ri ON ri.recipe_id = r.recipe_id
         GROUP BY  r.recipe_id
-        ORDER BY  r.created_at DESC
+    ORDER BY  r.created_at DESC, r.recipe_id DESC
         LIMIT     10
     ";
 
